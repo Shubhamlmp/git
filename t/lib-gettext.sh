@@ -32,9 +32,15 @@ then
 		q
 	}')
 
-	# Export them as an environment variable so the t0202/test.pl Perl
-	# test can use it too
-	export is_IS_locale is_IS_iso_locale
+	zh_CN_locale=$(locale -a 2>/dev/null |
+		sed -n '/^zh_CN\.[uU][tT][fF]-*8$/{
+		p
+		q
+	}')
+
+	# Export them as environment variables so other tests can use them
+	# too
+	export is_IS_locale is_IS_iso_locale zh_CN_locale
 
 	if test -n "$is_IS_locale" &&
 		test $GIT_INTERNAL_GETTEXT_SH_SCHEME != "fallthrough"
@@ -59,5 +65,15 @@ then
 		say "# lib-gettext: Found '$is_IS_iso_locale' as an is_IS ISO-8859-1 locale"
 	else
 		say "# lib-gettext: No is_IS ISO-8859-1 locale available"
+	fi
+
+	if test -n "$zh_CN_locale" &&
+		test $GIT_INTERNAL_GETTEXT_SH_SCHEME != "fallthrough"
+	then
+		test_set_prereq GETTEXT_ZH_LOCALE
+
+		say "# lib-gettext: Found '$zh_CN_locale' as a zh_CN UTF-8 locale"
+	else
+		say "# lib-gettext: No zh_CN UTF-8 locale available"
 	fi
 fi

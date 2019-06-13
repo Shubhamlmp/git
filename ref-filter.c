@@ -2242,11 +2242,23 @@ static int cmp_ref_sorting(struct ref_sorting *s, struct ref_array_item *a, stru
 		die("%s", err.buf);
 	strbuf_release(&err);
 	cmp_fn = s->ignore_case ? strcasecmp : strcmp;
-	if (s->version)
+	if (s->version) {
 		cmp = versioncmp(va->s, vb->s);
-	else if (cmp_type == FIELD_STR)
-		cmp = cmp_fn(va->s, vb->s);
-	else {
+	} else if (cmp_type == FIELD_STR) {
+		const int a_detached = a->kind & FILTER_REFS_DETACHED_HEAD;
+
+		/*
+		 * When sorting by name, we should put "detached" head lines,
+		 * which are all the lines in parenthesis, before all others.
+		 * This usually is automatic, since "(" is before "refs/" and
+		 * "remotes/", but this does not hold for zh_CN, which uses
+		 * full-width parenthesis, so make the ordering explicit.
+		 */
+		if (a_detached != (b->kind & FILTER_REFS_DETACHED_HEAD))
+			cmp = a_detached ? -1 : 1;
+		else
+			cmp = cmp_fn(va->s, vb->s);
+	} else {
 		if (va->value < vb->value)
 			cmp = -1;
 		else if (va->value == vb->value)

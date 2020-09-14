@@ -236,10 +236,10 @@ test_expect_success 'git mv should not change sha1 of moved cache entry' '
 	git add dirty &&
 	entry="$(git ls-files --stage dirty | cut -f 1)" &&
 	git mv dirty dirty2 &&
-	[ "$entry" = "$(git ls-files --stage dirty2 | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage dirty2 | cut -f 1)" &&
 	echo 2 >dirty2 &&
 	git mv dirty2 dirty &&
-	[ "$entry" = "$(git ls-files --stage dirty | cut -f 1)" ]
+	test "$entry" = "$(git ls-files --stage dirty | cut -f 1)"
 '
 
 rm -f dirty dirty2
@@ -326,7 +326,7 @@ test_expect_success 'git mv moves a submodule with a .git directory and no .gitm
 	mkdir mod &&
 	git mv sub mod/sub &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	git update-index --refresh &&
 	git diff-files --quiet
@@ -346,7 +346,7 @@ test_expect_success 'git mv moves a submodule with a .git directory and .gitmodu
 	mkdir mod &&
 	git mv sub mod/sub &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	echo mod/sub >expected &&
 	git config -f .gitmodules submodule.sub.path >actual &&
@@ -363,7 +363,7 @@ test_expect_success 'git mv moves a submodule with gitfile' '
 	mkdir mod &&
 	git -C mod mv ../sub/ . &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	echo mod/sub >expected &&
 	git config -f .gitmodules submodule.sub.path >actual &&
@@ -382,7 +382,7 @@ test_expect_success 'mv does not complain when no .gitmodules file is found' '
 	git mv sub mod/sub 2>actual.err &&
 	test_must_be_empty actual.err &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	git update-index --refresh &&
 	git diff-files --quiet
@@ -403,7 +403,7 @@ test_expect_success 'mv will error out on a modified .gitmodules file unless sta
 	git mv sub mod/sub 2>actual.err &&
 	test_must_be_empty actual.err &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	git update-index --refresh &&
 	git diff-files --quiet
@@ -421,7 +421,7 @@ test_expect_success 'mv issues a warning when section is not found in .gitmodule
 	git mv sub mod/sub 2>actual.err &&
 	test_i18ncmp expect.err actual.err &&
 	! test -e sub &&
-	[ "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" ] &&
+	test "$entry" = "$(git ls-files --stage mod/sub | cut -f 1)" &&
 	git -C mod/sub status &&
 	git update-index --refresh &&
 	git diff-files --quiet

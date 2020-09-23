@@ -503,14 +503,16 @@ test_expect_success 'moving a submodule in nested directories' '
 test_expect_success 'moving nested submodules' '
 	git commit -am "cleanup commit" &&
 	mkdir sub_nested_nested &&
-	(cd sub_nested_nested &&
+	(
+		cd sub_nested_nested &&
 		touch nested_level2 &&
 		git init &&
 		git add . &&
 		git commit -m "nested level 2"
 	) &&
 	mkdir sub_nested &&
-	(cd sub_nested &&
+	(
+		cd sub_nested &&
 		touch nested_level1 &&
 		git init &&
 		git add . &&

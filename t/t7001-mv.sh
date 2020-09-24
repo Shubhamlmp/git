@@ -32,6 +32,7 @@ test_expect_success 'commiting the change' '
 '
 
 test_expect_success 'checking the commit' '
+	test_when_finished "rmdir path1" &&
 	git diff-tree -r -M --name-status  HEAD^ HEAD >actual &&
 	grep "^R100..*path1/COPYING..*path0/COPYING" actual
 '
@@ -43,6 +44,7 @@ test_expect_success 'mv --dry-run does not move file' '
 '
 
 test_expect_success 'checking -k on non-existing file' '
+	test_when_finished "rm -f idontexist path0/idontexist" &&
 	git mv -k idontexist path0
 '
 
@@ -55,6 +57,7 @@ test_expect_success 'checking -k on untracked file' '
 
 test_expect_success 'checking -k on multiple untracked files' '
 	: > untracked2 &&
+	test_when_finished "rm -f untracked2 path0/untracked2" &&
 	git mv -k untracked1 untracked2 path0 &&
 	test -f untracked1 &&
 	test -f untracked2 &&
@@ -64,17 +67,13 @@ test_expect_success 'checking -k on multiple untracked files' '
 
 test_expect_success 'checking -f on untracked file with existing target' '
 	: > path0/untracked1 &&
+	test_when_finished "rm -f untracked1 path0/untracked1" &&
+	test_when_finished "rm -f .git/index.lock" &&
 	test_must_fail git mv -f untracked1 path0 &&
 	test ! -f .git/index.lock &&
 	test -f untracked1 &&
 	test -f path0/untracked1
 '
-
-# clean up the mess in case bad things happen
-rm -f idontexist untracked1 untracked2 \
-     path0/idontexist path0/untracked1 path0/untracked2 \
-     .git/index.lock
-rmdir path1
 
 test_expect_success 'moving to absent target with trailing slash' '
 	test_must_fail git mv path0/COPYING no-such-dir/ &&
@@ -149,10 +148,12 @@ test_expect_success 'do not move directory over existing directory' '
 '
 
 test_expect_success 'move into "."' '
+	test_when_finished "rm -fr path?" &&
 	git mv path1/path2/ .
 '
 
 test_expect_success "Michael Cassar's test case" '
+	test_when_finished "rm -fr papers partA" &&
 	rm -fr .git papers partA &&
 	git init &&
 	mkdir -p papers/unsorted papers/all-papers partA &&
@@ -167,8 +168,6 @@ test_expect_success "Michael Cassar's test case" '
 	T=$(git write-tree) &&
 	git ls-tree -r $T | verbose grep partA/outline.txt
 '
-
-rm -fr papers partA path?
 
 test_expect_success "Sergey Vlasov's test case" '
 	rm -fr .git &&
@@ -230,6 +229,7 @@ test_expect_success 'git mv to move multiple sources into a directory' '
 '
 
 test_expect_success 'git mv should not change sha1 of moved cache entry' '
+	test_when_finished "rm -f dirty dirty2" &&
 	rm -fr .git &&
 	git init &&
 	echo 1 >dirty &&
@@ -241,8 +241,6 @@ test_expect_success 'git mv should not change sha1 of moved cache entry' '
 	git mv dirty2 dirty &&
 	test "$entry" = "$(git ls-files --stage dirty | cut -f 1)"
 '
-
-rm -f dirty dirty2
 
 # NB: This test is about the error message
 # as well as the failure.
@@ -262,6 +260,7 @@ test_expect_success 'git mv error on conflicted file' '
 '
 
 test_expect_success 'git mv should overwrite symlink to a file' '
+	test_when_finished "rm -f moved symlink" &&
 	rm -fr .git &&
 	git init &&
 	echo 1 >moved &&
@@ -276,9 +275,8 @@ test_expect_success 'git mv should overwrite symlink to a file' '
 	git diff-files --quiet
 '
 
-rm -f moved symlink
-
 test_expect_success 'git mv should overwrite file with a symlink' '
+	test_when_finished "rm -f symlink" &&
 	rm -fr .git &&
 	git init &&
 	echo 1 >moved &&
@@ -292,10 +290,9 @@ test_expect_success 'git mv should overwrite file with a symlink' '
 '
 
 test_expect_success SYMLINKS 'check moved symlink' '
+	test_when_finished "rm -f moved" &&
 	test -h moved
 '
-
-rm -f moved symlink
 
 test_expect_success 'setup submodule' '
 	git commit -m initial &&

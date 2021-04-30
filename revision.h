@@ -148,6 +148,7 @@ struct rev_info {
 			edge_hint_aggressive:1,
 			limited:1,
 			unpacked:1,
+			no_kept_objects:1,
 			boundary:2,
 			count:1,
 			left_right:1,
@@ -188,13 +189,19 @@ struct rev_info {
 	unsigned int	diff:1,
 			full_diff:1,
 			show_root_diff:1,
+			match_missing:1,
 			no_commit_id:1,
 			verbose_header:1,
+			always_show_header:1,
+			/* Diff-merge flags */
+			explicit_diff_merges: 1,
+			merges_need_diff: 1,
+			separate_merges: 1,
 			combine_merges:1,
 			combined_all_paths:1,
+			combined_imply_patch:1,
 			dense_combined_merges:1,
-			always_show_header:1;
-	int             ignore_merges:2;
+			first_parent_merges:1;
 
 	/* Format info */
 	int		show_notes;
@@ -229,7 +236,7 @@ struct rev_info {
 	const char	*mime_boundary;
 	const char	*patch_suffix;
 	int		numbered_files;
-	int		reroll_count;
+	const char	*reroll_count;
 	char		*message_id;
 	struct ident_split from_ident;
 	struct string_list *ref_message_ids;
@@ -237,6 +244,7 @@ struct rev_info {
 	const char	*extra_headers;
 	const char	*log_reencode;
 	const char	*subject_prefix;
+	int		patch_name_max;
 	int		no_inline;
 	int		show_log_size;
 	struct string_list *mailmap;
@@ -310,6 +318,9 @@ struct rev_info {
 	 * This is loaded from the commit-graph being used.
 	 */
 	struct bloom_filter_settings *bloom_filter_settings;
+
+	/* misc. flags related to '--no-kept-objects' */
+	unsigned keep_pack_cache_flags;
 };
 
 int ref_excluded(struct string_list *, const char *path);

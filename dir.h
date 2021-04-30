@@ -354,7 +354,7 @@ int count_slashes(const char *s);
 int simple_length(const char *match);
 int no_wildcard(const char *string);
 char *common_prefix(const struct pathspec *pathspec);
-int match_pathspec(const struct index_state *istate,
+int match_pathspec(struct index_state *istate,
 		   const struct pathspec *pathspec,
 		   const char *name, int namelen,
 		   int prefix, char *seen, int is_dir);
@@ -420,7 +420,8 @@ int hashmap_contains_parent(struct hashmap *map,
 struct pattern_list *add_pattern_list(struct dir_struct *dir,
 				      int group_type, const char *src);
 int add_patterns_from_file_to_list(const char *fname, const char *base, int baselen,
-				   struct pattern_list *pl, struct  index_state *istate);
+				   struct pattern_list *pl, struct index_state *istate,
+				   unsigned flags);
 void add_patterns_from_file(struct dir_struct *, const char *fname);
 int add_patterns_from_blob_to_list(struct object_id *oid,
 				   const char *base, int baselen,
@@ -448,6 +449,8 @@ int is_empty_dir(const char *dir);
 
 void setup_standard_excludes(struct dir_struct *dir);
 
+char *get_sparse_checkout_filename(void);
+int get_sparse_checkout_patterns(struct pattern_list *pl);
 
 /* Constants for remove_dir_recursively: */
 
@@ -490,12 +493,12 @@ int git_fnmatch(const struct pathspec_item *item,
 		const char *pattern, const char *string,
 		int prefix);
 
-int submodule_path_match(const struct index_state *istate,
+int submodule_path_match(struct index_state *istate,
 			 const struct pathspec *ps,
 			 const char *submodule_name,
 			 char *seen);
 
-static inline int ce_path_match(const struct index_state *istate,
+static inline int ce_path_match(struct index_state *istate,
 				const struct cache_entry *ce,
 				const struct pathspec *pathspec,
 				char *seen)
@@ -504,7 +507,7 @@ static inline int ce_path_match(const struct index_state *istate,
 			      S_ISDIR(ce->ce_mode) || S_ISGITLINK(ce->ce_mode));
 }
 
-static inline int dir_path_match(const struct index_state *istate,
+static inline int dir_path_match(struct index_state *istate,
 				 const struct dir_entry *ent,
 				 const struct pathspec *pathspec,
 				 int prefix, char *seen)

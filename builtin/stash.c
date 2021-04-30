@@ -10,11 +10,13 @@
 #include "strvec.h"
 #include "run-command.h"
 #include "dir.h"
+#include "entry.h"
 #include "rerere.h"
 #include "revision.h"
 #include "log-tree.h"
 #include "diffcore.h"
 #include "exec-cmd.h"
+#include "entry.h"
 
 #define INCLUDE_ALL_FILES 2
 
@@ -87,7 +89,7 @@ static const char * const git_stash_save_usage[] = {
 	NULL
 };
 
-static const char *ref_stash = "refs/stash";
+static const char ref_stash[] = "refs/stash";
 static struct strbuf stash_index_path = STRBUF_INIT;
 
 /*
@@ -185,7 +187,7 @@ static int get_stash_info(struct stash_info *info, int argc, const char **argv)
 	end_of_rev = strchrnul(revision, '@');
 	strbuf_add(&symbolic, revision, end_of_rev - revision);
 
-	ret = dwim_ref(symbolic.buf, symbolic.len, &dummy, &expanded_ref);
+	ret = dwim_ref(symbolic.buf, symbolic.len, &dummy, &expanded_ref, 0);
 	strbuf_release(&symbolic);
 	switch (ret) {
 	case 0: /* Not found, but valid ref */
@@ -222,7 +224,7 @@ static int clear_stash(int argc, const char **argv, const char *prefix)
 			     PARSE_OPT_STOP_AT_NON_OPTION);
 
 	if (argc)
-		return error(_("git stash clear with parameters is "
+		return error(_("git stash clear with arguments is "
 			       "unimplemented"));
 
 	return do_clear_stash();
@@ -325,35 +327,6 @@ static void add_diff_to_buf(struct diff_queue_struct *q,
 	}
 }
 
-static int get_newly_staged(struct strbuf *out, struct object_id *c_tree)
-{
-	struct child_process cp = CHILD_PROCESS_INIT;
-	const char *c_tree_hex = oid_to_hex(c_tree);
-
-	/*
-	 * diff-index is very similar to diff-tree above, and should be
-	 * converted together with update_index.
-	 */
-	cp.git_cmd = 1;
-	strvec_pushl(&cp.args, "diff-index", "--cached", "--name-only",
-		     "--diff-filter=A", NULL);
-	strvec_push(&cp.args, c_tree_hex);
-	return pipe_command(&cp, NULL, 0, out, 0, NULL, 0);
-}
-
-static int update_index(struct strbuf *out)
-{
-	struct child_process cp = CHILD_PROCESS_INIT;
-
-	/*
-	 * Update-index is very complicated and may need to have a public
-	 * function exposed in order to remove this forking.
-	 */
-	cp.git_cmd = 1;
-	strvec_pushl(&cp.args, "update-index", "--add", "--stdin", NULL);
-	return pipe_command(&cp, out->buf, out->len, NULL, 0, NULL, 0);
-}
-
 static int restore_untracked(struct object_id *u_tree)
 {
 	int res;
@@ -383,6 +356,121 @@ static int restore_untracked(struct object_id *u_tree)
 	res = run_command(&cp);
 	remove_path(stash_index_path.buf);
 	return res;
+}
+
+static void unstage_changes_unless_new(struct object_id *orig_tree)
+{
+	/*
+	 * When we enter this function, there has been a clean merge of
+	 * relevant trees, and the merge logic always stages whatever merges
+	 * cleanly.  We want to unstage those changes, unless it corresponds
+	 * to a file that didn't exist as of orig_tree.
+	 *
+	 * However, if any SKIP_WORKTREE path is modified relative to
+	 * orig_tree, then we want to clear the SKIP_WORKTREE bit and write
+	 * it to the worktree before unstaging.
+	 */
+
+	struct checkout state = CHECKOUT_INIT;
+	struct diff_options diff_opts;
+	struct lock_file lock = LOCK_INIT;
+	int i;
+
+	/* If any entries have skip_worktree set, we'll have to check 'em out */
+	state.force = 1;
+	state.quiet = 1;
+	state.refresh_cache = 1;
+	state.istate = &the_index;
+
+	/*
+	 * Step 1: get a difference between orig_tree (which corresponding
+	 * to the index before a merge was run) and the current index
+	 * (reflecting the changes brought in by the merge).
+	 */
+	diff_setup(&diff_opts);
+	diff_opts.flags.recursive = 1;
+	diff_opts.detect_rename = 0;
+	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
+	diff_setup_done(&diff_opts);
+
+	do_diff_cache(orig_tree, &diff_opts);
+	diffcore_std(&diff_opts);
+
+	/* Iterate over the paths that changed due to the merge... */
+	for (i = 0; i < diff_queued_diff.nr; i++) {
+		struct diff_filepair *p;
+		struct cache_entry *ce;
+		int pos;
+
+		/* Look up the path's position in the current index. */
+		p = diff_queued_diff.queue[i];
+		pos = index_name_pos(&the_index, p->two->path,
+				     strlen(p->two->path));
+
+		/*
+		 * Step 2: Place changes in the working tree
+		 *
+		 * Stash is about restoring changes *to the working tree*.
+		 * So if the merge successfully got a new version of some
+		 * path, but left it out of the working tree, then clear the
+		 * SKIP_WORKTREE bit and write it to the working tree.
+		 */
+		if (pos >= 0 && ce_skip_worktree(active_cache[pos])) {
+			struct stat st;
+
+			ce = active_cache[pos];
+			if (!lstat(ce->name, &st)) {
+				/* Conflicting path present; relocate it */
+				struct strbuf new_path = STRBUF_INIT;
+				int fd;
+
+				strbuf_addf(&new_path,
+					    "%s.stash.XXXXXX", ce->name);
+				fd = xmkstemp(new_path.buf);
+				close(fd);
+				printf(_("WARNING: Untracked file in way of "
+					 "tracked file!  Renaming\n "
+					 "           %s -> %s\n"
+					 "         to make room.\n"),
+				       ce->name, new_path.buf);
+				if (rename(ce->name, new_path.buf))
+					die("Failed to move %s to %s\n",
+					    ce->name, new_path.buf);
+				strbuf_release(&new_path);
+			}
+			checkout_entry(ce, &state, NULL, NULL);
+			ce->ce_flags &= ~CE_SKIP_WORKTREE;
+		}
+
+		/*
+		 * Step 3: "unstage" changes, as long as they are still tracked
+		 */
+		if (p->one->oid_valid) {
+			/*
+			 * Path existed in orig_tree; restore index entry
+			 * from that tree in order to "unstage" the changes.
+			 */
+			int option = ADD_CACHE_OK_TO_REPLACE;
+			if (pos < 0)
+				option = ADD_CACHE_OK_TO_ADD;
+
+			ce = make_cache_entry(&the_index,
+					      p->one->mode,
+					      &p->one->oid,
+					      p->one->path,
+					      0, 0);
+			add_index_entry(&the_index, ce, option);
+		}
+	}
+	diff_flush(&diff_opts);
+
+	/*
+	 * Step 4: write the new index to disk
+	 */
+	repo_hold_locked_index(the_repository, &lock, LOCK_DIE_ON_ERROR);
+	if (write_locked_index(&the_index, &lock,
+			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
+		die(_("Unable to write index."));
 }
 
 static int do_apply_stash(const char *prefix, struct stash_info *info,
@@ -419,7 +507,7 @@ static int do_apply_stash(const char *prefix, struct stash_info *info,
 			ret = apply_cached(&out);
 			strbuf_release(&out);
 			if (ret)
-				return error(_("conflicts in index."
+				return error(_("conflicts in index. "
 					       "Try without --index."));
 
 			discard_cache();
@@ -467,26 +555,7 @@ static int do_apply_stash(const char *prefix, struct stash_info *info,
 		if (reset_tree(&index_tree, 0, 0))
 			return -1;
 	} else {
-		struct strbuf out = STRBUF_INIT;
-
-		if (get_newly_staged(&out, &c_tree)) {
-			strbuf_release(&out);
-			return -1;
-		}
-
-		if (reset_tree(&c_tree, 0, 1)) {
-			strbuf_release(&out);
-			return -1;
-		}
-
-		ret = update_index(&out);
-		strbuf_release(&out);
-		if (ret)
-			return -1;
-
-		/* read back the result of update_index() back from the disk */
-		discard_cache();
-		read_cache();
+		unstage_changes_unless_new(&c_tree);
 	}
 
 	if (!quiet) {
@@ -534,11 +603,22 @@ static int apply_stash(int argc, const char **argv, const char *prefix)
 	return ret;
 }
 
+static int reject_reflog_ent(struct object_id *ooid, struct object_id *noid,
+			     const char *email, timestamp_t timestamp, int tz,
+			     const char *message, void *cb_data)
+{
+	return 1;
+}
+
+static int reflog_is_empty(const char *refname)
+{
+	return !for_each_reflog_ent(refname, reject_reflog_ent, NULL);
+}
+
 static int do_drop_stash(struct stash_info *info, int quiet)
 {
 	int ret;
 	struct child_process cp_reflog = CHILD_PROCESS_INIT;
-	struct child_process cp = CHILD_PROCESS_INIT;
 
 	/*
 	 * reflog does not provide a simple function for deleting refs. One will
@@ -559,19 +639,7 @@ static int do_drop_stash(struct stash_info *info, int quiet)
 			     info->revision.buf);
 	}
 
-	/*
-	 * This could easily be replaced by get_oid, but currently it will throw
-	 * a fatal error when a reflog is empty, which we can not recover from.
-	 */
-	cp.git_cmd = 1;
-	/* Even though --quiet is specified, rev-parse still outputs the hash */
-	cp.no_stdout = 1;
-	strvec_pushl(&cp.args, "rev-parse", "--verify", "--quiet", NULL);
-	strvec_pushf(&cp.args, "%s@{0}", ref_stash);
-	ret = run_command(&cp);
-
-	/* do_clear_stash if we just dropped the last stash entry */
-	if (ret)
+	if (reflog_is_empty(ref_stash))
 		do_clear_stash();
 
 	return 0;
@@ -702,6 +770,7 @@ static int list_stash(int argc, const char **argv, const char *prefix)
 
 static int show_stat = 1;
 static int show_patch;
+static int show_include_untracked;
 static int use_legacy_stash;
 
 static int git_stash_config(const char *var, const char *value, void *cb)
@@ -714,11 +783,42 @@ static int git_stash_config(const char *var, const char *value, void *cb)
 		show_patch = git_config_bool(var, value);
 		return 0;
 	}
+	if (!strcmp(var, "stash.showincludeuntracked")) {
+		show_include_untracked = git_config_bool(var, value);
+		return 0;
+	}
 	if (!strcmp(var, "stash.usebuiltin")) {
 		use_legacy_stash = !git_config_bool(var, value);
 		return 0;
 	}
 	return git_diff_basic_config(var, value, cb);
+}
+
+static void diff_include_untracked(const struct stash_info *info, struct diff_options *diff_opt)
+{
+	const struct object_id *oid[] = { &info->w_commit, &info->u_tree };
+	struct tree *tree[ARRAY_SIZE(oid)];
+	struct tree_desc tree_desc[ARRAY_SIZE(oid)];
+	struct unpack_trees_options unpack_tree_opt = { 0 };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(oid); i++) {
+		tree[i] = parse_tree_indirect(oid[i]);
+		if (parse_tree(tree[i]) < 0)
+			die(_("failed to parse tree"));
+		init_tree_desc(&tree_desc[i], tree[i]->buffer, tree[i]->size);
+	}
+
+	unpack_tree_opt.head_idx = -1;
+	unpack_tree_opt.src_index = &the_index;
+	unpack_tree_opt.dst_index = &the_index;
+	unpack_tree_opt.merge = 1;
+	unpack_tree_opt.fn = stash_worktree_untracked_merge;
+
+	if (unpack_trees(ARRAY_SIZE(tree_desc), tree_desc, &unpack_tree_opt))
+		die(_("failed to unpack trees"));
+
+	do_diff_cache(&info->b_commit, diff_opt);
 }
 
 static int show_stash(int argc, const char **argv, const char *prefix)
@@ -729,13 +829,28 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 	struct rev_info rev;
 	struct strvec stash_args = STRVEC_INIT;
 	struct strvec revision_args = STRVEC_INIT;
+	enum {
+		UNTRACKED_NONE,
+		UNTRACKED_INCLUDE,
+		UNTRACKED_ONLY
+	} show_untracked = UNTRACKED_NONE;
 	struct option options[] = {
+		OPT_SET_INT('u', "include-untracked", &show_untracked,
+			    N_("include untracked files in the stash"),
+			    UNTRACKED_INCLUDE),
+		OPT_SET_INT_F(0, "only-untracked", &show_untracked,
+			      N_("only show untracked files in the stash"),
+			      UNTRACKED_ONLY, PARSE_OPT_NONEG),
 		OPT_END()
 	};
 
 	init_diff_ui_defaults();
 	git_config(git_diff_ui_config, NULL);
 	init_revisions(&rev, prefix);
+
+	argc = parse_options(argc, argv, prefix, options, git_stash_show_usage,
+			     PARSE_OPT_KEEP_ARGV0 | PARSE_OPT_KEEP_UNKNOWN |
+			     PARSE_OPT_KEEP_DASHDASH);
 
 	strvec_push(&revision_args, argv[0]);
 	for (i = 1; i < argc; i++) {
@@ -761,6 +876,9 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 		if (show_patch)
 			rev.diffopt.output_format |= DIFF_FORMAT_PATCH;
 
+		if (show_include_untracked)
+			show_untracked = UNTRACKED_INCLUDE;
+
 		if (!show_stat && !show_patch) {
 			free_stash_info(&info);
 			return 0;
@@ -779,7 +897,17 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 
 	rev.diffopt.flags.recursive = 1;
 	setup_diff_pager(&rev.diffopt);
-	diff_tree_oid(&info.b_commit, &info.w_commit, "", &rev.diffopt);
+	switch (show_untracked) {
+	case UNTRACKED_NONE:
+		diff_tree_oid(&info.b_commit, &info.w_commit, "", &rev.diffopt);
+		break;
+	case UNTRACKED_ONLY:
+		diff_root_tree_oid(&info.u_tree, "", &rev.diffopt);
+		break;
+	case UNTRACKED_INCLUDE:
+		diff_include_untracked(&info, &rev.diffopt);
+		break;
+	}
 	log_tree_diff_flush(&rev);
 
 	free_stash_info(&info);
@@ -1284,6 +1412,8 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 		int i;
 		char *ps_matched = xcalloc(ps->nr, 1);
 
+		/* TODO: audit for interaction with sparse-index. */
+		ensure_full_index(&the_index);
 		for (i = 0; i < active_nr; i++)
 			ce_path_match(&the_index, active_cache[i], ps,
 				      ps_matched);

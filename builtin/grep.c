@@ -211,13 +211,11 @@ static void start_threads(struct grep_opt *opt)
 		strbuf_init(&todo[i].out, 0);
 	}
 
-	threads = xcalloc(num_threads, sizeof(*threads));
+	CALLOC_ARRAY(threads, num_threads);
 	for (i = 0; i < num_threads; i++) {
 		int err;
 		struct grep_opt *o = grep_opt_dup(opt);
 		o->output = strbuf_out;
-		if (i)
-			o->debug = 0;
 		compile_grep_patterns(o);
 		err = pthread_create(&threads[i], NULL, run, o);
 
@@ -319,7 +317,7 @@ static void grep_source_name(struct grep_opt *opt, const char *filename,
 	}
 
 	if (opt->relative && opt->prefix_length)
-		quote_path_relative(filename + tree_name_len, opt->prefix, out);
+		quote_path(filename + tree_name_len, opt->prefix, out, 0);
 	else
 		quote_c_style(filename + tree_name_len, out, NULL, 0);
 
@@ -506,8 +504,14 @@ static int grep_cache(struct grep_opt *opt,
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
 
+	/* TODO: audit for interaction with sparse-index. */
+	ensure_full_index(repo->index);
 	for (nr = 0; nr < repo->index->cache_nr; nr++) {
 		const struct cache_entry *ce = repo->index->cache[nr];
+
+		if (!cached && ce_skip_worktree(ce))
+			continue;
+
 		strbuf_setlen(&name, name_base_len);
 		strbuf_addstr(&name, ce->name);
 
@@ -520,8 +524,7 @@ static int grep_cache(struct grep_opt *opt,
 			 * cache entry are identical, even if worktree file has
 			 * been modified, so use cache version instead
 			 */
-			if (cached || (ce->ce_flags & CE_VALID) ||
-			    ce_skip_worktree(ce)) {
+			if (cached || (ce->ce_flags & CE_VALID)) {
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
 				hit |= grep_oid(opt, &ce->oid, name.buf,
@@ -669,6 +672,17 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		real_obj = deref_tag(opt->repo, list->objects[i].item,
 				     NULL, 0);
 		obj_read_unlock();
+
+		if (!real_obj) {
+			char hex[GIT_MAX_HEXSZ + 1];
+			const char *name = list->objects[i].name;
+
+			if (!name) {
+				oid_to_hex_r(hex, &list->objects[i].item->oid);
+				name = hex;
+			}
+			die(_("invalid object '%s' given."), name);
+		}
 
 		/* load the gitmodules file for this rev */
 		if (recurse_submodules) {
@@ -925,9 +939,6 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 			   N_("indicate hit with exit status without output")),
 		OPT_BOOL(0, "all-match", &opt.all_match,
 			N_("show only matches from files that match all patterns")),
-		OPT_SET_INT_F(0, "debug", &opt.debug,
-			      N_("show parse tree for grep expression"),
-			      1, PARSE_OPT_HIDDEN),
 		OPT_GROUP(""),
 		{ OPTION_STRING, 'O', "open-files-in-pager", &show_in_pager,
 			N_("pager"), N_("show matching files in the pager"),
@@ -939,7 +950,6 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	init_grep_defaults(the_repository);
 	git_config(grep_cmd_config, NULL);
 	grep_init(&opt, the_repository, prefix);
 
@@ -1147,6 +1157,9 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 	if (!use_index && (untracked || cached))
 		die(_("--cached or --untracked cannot be used with --no-index"));
 
+	if (untracked && cached)
+		die(_("--untracked cannot be used with --cached"));
+
 	if (!use_index || untracked) {
 		int use_exclude = (opt_exclude < 0) ? use_index : !!opt_exclude;
 		hit = grep_directory(&opt, &pathspec, use_exclude, use_index);
@@ -1170,6 +1183,5 @@ int cmd_grep(int argc, const char **argv, const char *prefix)
 		run_pager(&opt, prefix);
 	clear_pathspec(&pathspec);
 	free_grep_patterns(&opt);
-	grep_destroy();
 	return !hit;
 }

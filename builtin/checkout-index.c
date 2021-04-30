@@ -11,6 +11,7 @@
 #include "quote.h"
 #include "cache-tree.h"
 #include "parse-options.h"
+#include "entry.h"
 
 #define CHECKOUT_ALL 4
 static int nul_term_line;
@@ -23,22 +24,35 @@ static struct checkout state = CHECKOUT_INIT;
 static void write_tempfile_record(const char *name, const char *prefix)
 {
 	int i;
+	int have_tempname = 0;
 
 	if (CHECKOUT_ALL == checkout_stage) {
-		for (i = 1; i < 4; i++) {
-			if (i > 1)
-				putchar(' ');
-			if (topath[i][0])
-				fputs(topath[i], stdout);
-			else
-				putchar('.');
-		}
-	} else
-		fputs(topath[checkout_stage], stdout);
+		for (i = 1; i < 4; i++)
+			if (topath[i][0]) {
+				have_tempname = 1;
+				break;
+			}
 
-	putchar('\t');
-	write_name_quoted_relative(name, prefix, stdout,
-				   nul_term_line ? '\0' : '\n');
+		if (have_tempname) {
+			for (i = 1; i < 4; i++) {
+				if (i > 1)
+					putchar(' ');
+				if (topath[i][0])
+					fputs(topath[i], stdout);
+				else
+					putchar('.');
+			}
+		}
+	} else if (topath[checkout_stage][0]) {
+		have_tempname = 1;
+		fputs(topath[checkout_stage], stdout);
+	}
+
+	if (have_tempname) {
+		putchar('\t');
+		write_name_quoted_relative(name, prefix, stdout,
+					   nul_term_line ? '\0' : '\n');
+	}
 
 	for (i = 0; i < 4; i++) {
 		topath[i][0] = 0;
@@ -79,6 +93,14 @@ static int checkout_file(const char *name, const char *prefix)
 		return errs > 0 ? -1 : 0;
 	}
 
+	/*
+	 * At this point we know we didn't try to check anything out. If it was
+	 * because we did find an entry but it was stage 0, that's not an
+	 * error.
+	 */
+	if (has_same_name && checkout_stage == CHECKOUT_ALL)
+		return 0;
+
 	if (!state.quiet) {
 		fprintf(stderr, "git checkout-index: %s ", name);
 		if (!has_same_name)
@@ -98,6 +120,8 @@ static void checkout_all(const char *prefix, int prefix_length)
 	int i, errs = 0;
 	struct cache_entry *last_ce = NULL;
 
+	/* TODO: audit for interaction with sparse-index. */
+	ensure_full_index(&the_index);
 	for (i = 0; i < active_nr ; i++) {
 		struct cache_entry *ce = active_cache[i];
 		if (ce_stage(ce) != checkout_stage
@@ -159,6 +183,7 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 	int prefix_length;
 	int force = 0, quiet = 0, not_new = 0;
 	int index_opt = 0;
+	int err = 0;
 	struct option builtin_checkout_index_options[] = {
 		OPT_BOOL('a', "all", &all,
 			N_("check out all files in the index")),
@@ -223,7 +248,7 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 		if (read_from_stdin)
 			die("git checkout-index: don't mix '--stdin' and explicit filenames");
 		p = prefix_path(prefix, prefix_length, arg);
-		checkout_file(p, prefix);
+		err |= checkout_file(p, prefix);
 		free(p);
 	}
 
@@ -245,12 +270,15 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 				strbuf_swap(&buf, &unquoted);
 			}
 			p = prefix_path(prefix, prefix_length, buf.buf);
-			checkout_file(p, prefix);
+			err |= checkout_file(p, prefix);
 			free(p);
 		}
 		strbuf_release(&unquoted);
 		strbuf_release(&buf);
 	}
+
+	if (err)
+		return 1;
 
 	if (all)
 		checkout_all(prefix, prefix_length);

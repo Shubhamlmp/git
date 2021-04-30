@@ -15,7 +15,6 @@
 #include "sequencer.h"
 #include "line-log.h"
 #include "help.h"
-#include "interdiff.h"
 #include "range-diff.h"
 
 static struct decoration name_decoration = { "object names" };
@@ -368,10 +367,16 @@ void fmt_output_subject(struct strbuf *filename,
 	const char *suffix = info->patch_suffix;
 	int nr = info->nr;
 	int start_len = filename->len;
-	int max_len = start_len + FORMAT_PATCH_NAME_MAX - (strlen(suffix) + 1);
+	int max_len = start_len + info->patch_name_max - (strlen(suffix) + 1);
 
-	if (0 < info->reroll_count)
-		strbuf_addf(filename, "v%d-", info->reroll_count);
+	if (info->reroll_count) {
+		struct strbuf temp = STRBUF_INIT;
+
+		strbuf_addf(&temp, "v%s", info->reroll_count);
+		format_sanitized_subject(filename, temp.buf, temp.len);
+		strbuf_addstr(filename, "-");
+		strbuf_release(&temp);
+	}
 	strbuf_addf(filename, "%04d-%s", nr, subject);
 
 	if (max_len < filename->len)
@@ -503,7 +508,7 @@ static void show_signature(struct rev_info *opt, struct commit *commit)
 	struct signature_check sigc = { 0 };
 	int status;
 
-	if (parse_signed_commit(commit, &payload, &signature) <= 0)
+	if (parse_signed_commit(commit, &payload, &signature, the_hash_algo) <= 0)
 		goto out;
 
 	status = check_signature(payload.buf, payload.len, signature.buf,
@@ -549,7 +554,8 @@ static int show_one_mergetag(struct commit *commit,
 	struct strbuf verify_message;
 	struct signature_check sigc = { 0 };
 	int status, nth;
-	size_t payload_size;
+	struct strbuf payload = STRBUF_INIT;
+	struct strbuf signature = STRBUF_INIT;
 
 	hash_object_file(the_hash_algo, extra->value, extra->len,
 			 type_name(OBJ_TAG), &oid);
@@ -572,13 +578,11 @@ static int show_one_mergetag(struct commit *commit,
 		strbuf_addf(&verify_message,
 			    "parent #%d, tagged '%s'\n", nth + 1, tag->tag);
 
-	payload_size = parse_signature(extra->value, extra->len);
 	status = -1;
-	if (extra->len > payload_size) {
+	if (parse_signature(extra->value, extra->len, &payload, &signature)) {
 		/* could have a good signature */
-		status = check_signature(extra->value, payload_size,
-					 extra->value + payload_size,
-					 extra->len - payload_size, &sigc);
+		status = check_signature(payload.buf, payload.len,
+					 signature.buf, signature.len, &sigc);
 		if (sigc.gpg_output)
 			strbuf_addstr(&verify_message, sigc.gpg_output);
 		else
@@ -589,6 +593,8 @@ static int show_one_mergetag(struct commit *commit,
 
 	show_sig_lines(opt, status, verify_message.buf);
 	strbuf_release(&verify_message);
+	strbuf_release(&payload);
+	strbuf_release(&signature);
 	return 0;
 }
 
@@ -800,7 +806,8 @@ void show_log(struct rev_info *opt)
 
 		next_commentary_block(opt, NULL);
 		fprintf_ln(opt->diffopt.file, "%s", opt->idiff_title);
-		show_interdiff(opt, 2);
+		show_interdiff(opt->idiff_oid1, opt->idiff_oid2, 2,
+			       &opt->diffopt);
 
 		memcpy(&diff_queued_diff, &dq, sizeof(diff_queued_diff));
 	}
@@ -808,6 +815,11 @@ void show_log(struct rev_info *opt)
 	if (cmit_fmt_is_mail(ctx.fmt) && opt->rdiff1) {
 		struct diff_queue_struct dq;
 		struct diff_options opts;
+		struct range_diff_options range_diff_opts = {
+			.creation_factor = opt->creation_factor,
+			.dual_color = 1,
+			.diffopt = &opts
+		};
 
 		memcpy(&dq, &diff_queued_diff, sizeof(diff_queued_diff));
 		DIFF_QUEUE_CLEAR(&diff_queued_diff);
@@ -822,8 +834,7 @@ void show_log(struct rev_info *opt)
 		opts.file = opt->diffopt.file;
 		opts.use_color = opt->diffopt.use_color;
 		diff_setup_done(&opts);
-		show_range_diff(opt->rdiff1, opt->rdiff2,
-				opt->creation_factor, 1, &opts, NULL);
+		show_range_diff(opt->rdiff1, opt->rdiff2, &range_diff_opts);
 
 		memcpy(&diff_queued_diff, &dq, sizeof(diff_queued_diff));
 	}
@@ -885,7 +896,7 @@ int log_tree_diff_flush(struct rev_info *opt)
 
 static int do_diff_combined(struct rev_info *opt, struct commit *commit)
 {
-	diff_tree_combined_merge(commit, opt->dense_combined_merges, opt);
+	diff_tree_combined_merge(commit, opt);
 	return !opt->loginfo;
 }
 
@@ -899,15 +910,21 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 	int showed_log;
 	struct commit_list *parents;
 	struct object_id *oid;
+	int is_merge;
+	int all_need_diff = opt->diff || opt->diffopt.flags.exit_with_status;
 
-	if (!opt->diff && !opt->diffopt.flags.exit_with_status)
+	if (!all_need_diff && !opt->merges_need_diff)
 		return 0;
 
 	parse_commit_or_die(commit);
 	oid = get_commit_tree_oid(commit);
 
-	/* Root commit? */
 	parents = get_saved_parents(opt, commit);
+	is_merge = parents && parents->next;
+	if (!is_merge && !all_need_diff)
+		return 0;
+
+	/* Root commit? */
 	if (!parents) {
 		if (opt->show_root_diff) {
 			diff_root_tree_oid(oid, "", &opt->diffopt);
@@ -916,27 +933,16 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 		return !opt->loginfo;
 	}
 
-	/* More than one parent? */
-	if (parents && parents->next) {
-		if (opt->ignore_merges)
-			return 0;
-		else if (opt->combine_merges)
+	if (is_merge) {
+		if (opt->combine_merges)
 			return do_diff_combined(opt, commit);
-		else if (opt->first_parent_only) {
-			/*
-			 * Generate merge log entry only for the first
-			 * parent, showing summary diff of the others
-			 * we merged _in_.
-			 */
-			parse_commit_or_die(parents->item);
-			diff_tree_oid(get_commit_tree_oid(parents->item),
-				      oid, "", &opt->diffopt);
-			log_tree_diff_flush(opt);
-			return !opt->loginfo;
-		}
-
-		/* If we show individual diffs, show the parent info */
-		log->parent = parents->item;
+		if (opt->separate_merges) {
+			if (!opt->first_parent_merges) {
+				/* Show parent info for multiple diffs */
+				log->parent = parents->item;
+			}
+		} else
+			return 0;
 	}
 
 	showed_log = 0;
@@ -952,7 +958,7 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 
 		/* Set up the log info for the next parent, if any.. */
 		parents = parents->next;
-		if (!parents)
+		if (!parents || opt->first_parent_merges)
 			break;
 		log->parent = parents->item;
 		opt->loginfo = log;
@@ -963,12 +969,14 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 int log_tree_commit(struct rev_info *opt, struct commit *commit)
 {
 	struct log_info log;
-	int shown, close_file = opt->diffopt.close_file;
+	int shown;
+	/* maybe called by e.g. cmd_log_walk(), maybe stand-alone */
+	int no_free = opt->diffopt.no_free;
 
 	log.commit = commit;
 	log.parent = NULL;
 	opt->loginfo = &log;
-	opt->diffopt.close_file = 0;
+	opt->diffopt.no_free = 1;
 
 	if (opt->line_level_traverse)
 		return line_log_print(opt, commit);
@@ -985,7 +993,7 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 		fprintf(opt->diffopt.file, "\n%s\n", opt->break_bar);
 	opt->loginfo = NULL;
 	maybe_flush_or_die(opt->diffopt.file, "stdout");
-	if (close_file)
-		fclose(opt->diffopt.file);
+	opt->diffopt.no_free = no_free;
+	diff_free(&opt->diffopt);
 	return shown;
 }

@@ -265,6 +265,32 @@ test_expect_success 'internal getpass does not ask for known username' '
 	EOF
 '
 
+test_expect_success 'git-credential respects core.askPass' '
+	write_script alternate-askpass <<-\EOF &&
+	echo >&2 "alternate askpass invoked"
+	echo alternate-value
+	EOF
+	test_config core.askpass "$PWD/alternate-askpass" &&
+	(
+		# unset GIT_ASKPASS set by lib-credential.sh which would
+		# override our config, but do so in a subshell so that we do
+		# not interfere with other tests
+		sane_unset GIT_ASKPASS &&
+		check fill <<-\EOF
+		protocol=http
+		host=example.com
+		--
+		protocol=http
+		host=example.com
+		username=alternate-value
+		password=alternate-value
+		--
+		alternate askpass invoked
+		alternate askpass invoked
+		EOF
+	)
+'
+
 HELPER="!f() {
 		cat >/dev/null
 		echo username=foo
@@ -552,7 +578,7 @@ test_expect_success 'helpers can abort the process' '
 	quit: host=example.com
 	fatal: credential helper '\''quit'\'' told us to quit
 	EOF
-	test_i18ncmp expect stderr
+	test_cmp expect stderr
 '
 
 test_expect_success 'empty helper spec resets helper list' '
@@ -580,7 +606,7 @@ test_expect_success 'url parser rejects embedded newlines' '
 	warning: url contains a newline in its path component: https://one.example.com?%0ahost=two.example.com/
 	fatal: credential url cannot be parsed: https://one.example.com?%0ahost=two.example.com/
 	EOF
-	test_i18ncmp expect stderr
+	test_cmp expect stderr
 '
 
 test_expect_success 'host-less URLs are parsed as empty host' '
@@ -607,7 +633,7 @@ test_expect_success 'credential system refuses to work with missing host' '
 	cat >expect <<-\EOF &&
 	fatal: refusing to work with credential missing host field
 	EOF
-	test_i18ncmp expect stderr
+	test_cmp expect stderr
 '
 
 test_expect_success 'credential system refuses to work with missing protocol' '
@@ -617,7 +643,7 @@ test_expect_success 'credential system refuses to work with missing protocol' '
 	cat >expect <<-\EOF &&
 	fatal: refusing to work with credential missing protocol field
 	EOF
-	test_i18ncmp expect stderr
+	test_cmp expect stderr
 '
 
 # usage: check_host_and_path <url> <expected-host> <expected-path>

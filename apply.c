@@ -21,6 +21,7 @@
 #include "quote.h"
 #include "rerere.h"
 #include "apply.h"
+#include "entry.h"
 
 struct gitdiff_data {
 	struct strbuf *root;
@@ -133,8 +134,6 @@ int check_apply_state(struct apply_state *state, int force_apply)
 
 	if (state->apply_with_reject && state->threeway)
 		return error(_("--reject and --3way cannot be used together."));
-	if (state->cached && state->threeway)
-		return error(_("--cached and --3way cannot be used together."));
 	if (state->threeway) {
 		if (is_not_gitdir)
 			return error(_("--3way outside a repository"));
@@ -1781,7 +1780,7 @@ static int parse_single_patch(struct apply_state *state,
 		struct fragment *fragment;
 		int len;
 
-		fragment = xcalloc(1, sizeof(*fragment));
+		CALLOC_ARRAY(fragment, 1);
 		fragment->linenr = state->linenr;
 		len = parse_fragment(state, line, size, patch, fragment);
 		if (len <= 0) {
@@ -1959,7 +1958,7 @@ static struct fragment *parse_binary_hunk(struct apply_state *state,
 		size -= llen;
 	}
 
-	frag = xcalloc(1, sizeof(*frag));
+	CALLOC_ARRAY(frag, 1);
 	frag->patch = inflate_it(data, hunk_size, origlen);
 	frag->free_patch = 1;
 	if (!frag->patch)
@@ -3569,10 +3568,10 @@ static int try_threeway(struct apply_state *state,
 		write_object_file("", 0, blob_type, &pre_oid);
 	else if (get_oid(patch->old_oid_prefix, &pre_oid) ||
 		 read_blob_object(&buf, &pre_oid, patch->old_mode))
-		return error(_("repository lacks the necessary blob to fall back on 3-way merge."));
+		return error(_("repository lacks the necessary blob to perform 3-way merge."));
 
 	if (state->apply_verbosity > verbosity_silent)
-		fprintf(stderr, _("Falling back to three-way merge...\n"));
+		fprintf(stderr, _("Performing three-way merge...\n"));
 
 	img = strbuf_detach(&buf, &len);
 	prepare_image(&tmp_image, img, len, 1);
@@ -3604,7 +3603,7 @@ static int try_threeway(struct apply_state *state,
 	if (status < 0) {
 		if (state->apply_verbosity > verbosity_silent)
 			fprintf(stderr,
-				_("Failed to fall back on three-way merge...\n"));
+				_("Failed to perform three-way merge...\n"));
 		return status;
 	}
 
@@ -3637,10 +3636,9 @@ static int apply_data(struct apply_state *state, struct patch *patch,
 	if (load_preimage(state, &image, patch, st, ce) < 0)
 		return -1;
 
-	if (patch->direct_to_threeway ||
-	    apply_fragments(state, &image, patch) < 0) {
+	if (!state->threeway || try_threeway(state, &image, patch, st, ce) < 0) {
 		/* Note: with --reject, apply_fragments() returns 0 */
-		if (!state->threeway || try_threeway(state, &image, patch, st, ce) < 0)
+		if (patch->direct_to_threeway || apply_fragments(state, &image, patch) < 0)
 			return -1;
 	}
 	patch->result = image.buf;
@@ -3948,10 +3946,8 @@ static int check_patch(struct apply_state *state, struct patch *patch)
 			break; /* happy */
 		case EXISTS_IN_INDEX:
 			return error(_("%s: already exists in index"), new_name);
-			break;
 		case EXISTS_IN_INDEX_AS_ITA:
 			return error(_("%s: does not match index"), new_name);
-			break;
 		case EXISTS_IN_WORKTREE:
 			return error(_("%s: already exists in working directory"),
 				     new_name);
@@ -4409,7 +4405,7 @@ static int create_one_file(struct apply_state *state,
 		return 0;
 
 	if (errno == ENOENT) {
-		if (safe_create_leading_directories(path))
+		if (safe_create_leading_directories_no_share(path))
 			return 0;
 		res = try_create_file(state, path, mode, buf, size);
 		if (res < 0)
@@ -4648,7 +4644,12 @@ static int write_out_results(struct apply_state *state, struct patch *list)
 		}
 		string_list_clear(&cpath, 0);
 
-		repo_rerere(state->repo, 0);
+		/*
+		 * rerere relies on the partially merged result being in the working
+		 * tree with conflict markers, but that isn't written with --cached.
+		 */
+		if (!state->cached)
+			repo_rerere(state->repo, 0);
 	}
 
 	return errs;
@@ -4683,7 +4684,7 @@ static int apply_patch(struct apply_state *state,
 		struct patch *patch;
 		int nr;
 
-		patch = xcalloc(1, sizeof(*patch));
+		CALLOC_ARRAY(patch, 1);
 		patch->inaccurate_eof = !!(options & APPLY_OPT_INACCURATE_EOF);
 		patch->recount =  !!(options & APPLY_OPT_RECOUNT);
 		nr = parse_chunk(state, buf.buf + offset, buf.len - offset, patch);
@@ -4699,8 +4700,13 @@ static int apply_patch(struct apply_state *state,
 			reverse_patches(patch);
 		if (use_patch(state, patch)) {
 			patch_stats(state, patch);
-			*listp = patch;
-			listp = &patch->next;
+			if (!list || !state->apply_in_reverse) {
+				*listp = patch;
+				listp = &patch->next;
+			} else {
+				patch->next = list;
+				list = patch;
+			}
 
 			if ((patch->new_name &&
 			     ends_with_path_components(patch->new_name,
@@ -5014,7 +5020,7 @@ int apply_parse_options(int argc, const char **argv,
 		OPT_BOOL(0, "apply", force_apply,
 			N_("also apply the patch (use with --stat/--summary/--check)")),
 		OPT_BOOL('3', "3way", &state->threeway,
-			 N_( "attempt three-way merge if a patch does not apply")),
+			 N_( "attempt three-way merge, fall back on normal patch if that fails")),
 		OPT_FILENAME(0, "build-fake-ancestor", &state->fake_ancestor,
 			N_("build a temporary index based on embedded index information")),
 		/* Think twice before adding "--nul" synonym to this */

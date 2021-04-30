@@ -435,7 +435,7 @@ static void get_fingerprint(struct fingerprint *result,
 
 static void free_fingerprint(struct fingerprint *f)
 {
-	hashmap_free(&f->map);
+	hashmap_clear(&f->map);
 	free(f->entries);
 }
 
@@ -951,13 +951,13 @@ static int *fuzzy_find_matching_lines(struct blame_origin *parent,
 	max_search_distance_b = ((2 * max_search_distance_a + 1) * length_b
 				 - 1) / length_a;
 
-	result = xcalloc(sizeof(int), length_b);
-	second_best_result = xcalloc(sizeof(int), length_b);
-	certainties = xcalloc(sizeof(int), length_b);
+	CALLOC_ARRAY(result, length_b);
+	CALLOC_ARRAY(second_best_result, length_b);
+	CALLOC_ARRAY(certainties, length_b);
 
 	/* See get_similarity() for details of similarities. */
 	similarity_count = length_b * (max_search_distance_a * 2 + 1);
-	similarities = xcalloc(sizeof(int), similarity_count);
+	CALLOC_ARRAY(similarities, similarity_count);
 
 	for (i = 0; i < length_b; ++i) {
 		result[i] = -1;
@@ -995,7 +995,7 @@ static void fill_origin_fingerprints(struct blame_origin *o)
 		return;
 	o->num_lines = find_line_starts(&line_starts, o->file.ptr,
 					o->file.size);
-	o->fingerprints = xcalloc(sizeof(struct fingerprint), o->num_lines);
+	CALLOC_ARRAY(o->fingerprints, o->num_lines);
 	get_line_fingerprints(o->fingerprints, o->file.ptr, line_starts,
 			      0, o->num_lines);
 	free(line_starts);
@@ -1276,7 +1276,7 @@ static int maybe_changed_path(struct repository *r,
 	if (commit_graph_generation(origin->commit) == GENERATION_NUMBER_INFINITY)
 		return 1;
 
-	filter = get_bloom_filter(r, origin->commit, 0);
+	filter = get_bloom_filter(r, origin->commit);
 
 	if (!filter)
 		return 1;
@@ -1353,8 +1353,8 @@ static struct blame_origin *find_origin(struct repository *r,
 	else {
 		int compute_diff = 1;
 		if (origin->commit->parents &&
-		    !oidcmp(&parent->object.oid,
-			    &origin->commit->parents->item->object.oid))
+		    oideq(&parent->object.oid,
+			  &origin->commit->parents->item->object.oid))
 			compute_diff = maybe_changed_path(r, origin, bd);
 
 		if (compute_diff)
@@ -1853,8 +1853,7 @@ static void blame_chunk(struct blame_entry ***dstq, struct blame_entry ***srcq,
 	diffp = NULL;
 
 	if (ignore_diffs && same - tlno > 0) {
-		line_blames = xcalloc(sizeof(struct blame_line_tracker),
-				      same - tlno);
+		CALLOC_ARRAY(line_blames, same - tlno);
 		guess_line_blames(parent, target, tlno, offset, same,
 				  parent_len, line_blames);
 	}
@@ -2216,7 +2215,7 @@ static struct blame_list *setup_blame_list(struct blame_entry *unblamed,
 	for (e = unblamed, num_ents = 0; e; e = e->next)
 		num_ents++;
 	if (num_ents) {
-		blame_list = xcalloc(num_ents, sizeof(struct blame_list));
+		CALLOC_ARRAY(blame_list, num_ents);
 		for (e = unblamed, i = 0; e; e = e->next)
 			blame_list[i++].ent = e;
 	}
@@ -2428,7 +2427,7 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 	else if (num_sg < ARRAY_SIZE(sg_buf))
 		memset(sg_buf, 0, sizeof(sg_buf));
 	else
-		sg_origin = xcalloc(num_sg, sizeof(*sg_origin));
+		CALLOC_ARRAY(sg_origin, num_sg);
 
 	/*
 	 * The first pass looks for unrenamed path to optimize for
@@ -2670,7 +2669,7 @@ static struct commit *find_single_final(struct rev_info *revs,
 		if (obj->flags & UNINTERESTING)
 			continue;
 		obj = deref_tag(revs->repo, obj, NULL, 0);
-		if (obj->type != OBJ_COMMIT)
+		if (!obj || obj->type != OBJ_COMMIT)
 			die("Non commit %s?", revs->pending.objects[i].name);
 		if (found)
 			die("More than one commit to dig from %s and %s?",
@@ -2701,7 +2700,7 @@ static struct commit *dwim_reverse_initial(struct rev_info *revs,
 	/* Is that sole rev a committish? */
 	obj = revs->pending.objects[0].item;
 	obj = deref_tag(revs->repo, obj, NULL, 0);
-	if (obj->type != OBJ_COMMIT)
+	if (!obj || obj->type != OBJ_COMMIT)
 		return NULL;
 
 	/* Do we have HEAD? */
@@ -2737,7 +2736,7 @@ static struct commit *find_single_initial(struct rev_info *revs,
 		if (!(obj->flags & UNINTERESTING))
 			continue;
 		obj = deref_tag(revs->repo, obj, NULL, 0);
-		if (obj->type != OBJ_COMMIT)
+		if (!obj || obj->type != OBJ_COMMIT)
 			die("Non commit %s?", revs->pending.objects[i].name);
 		if (found)
 			die("More than one commit to dig up from, %s and %s?",
@@ -2764,7 +2763,6 @@ void init_scoreboard(struct blame_scoreboard *sb)
 }
 
 void setup_scoreboard(struct blame_scoreboard *sb,
-		      const char *path,
 		      struct blame_origin **orig)
 {
 	const char *final_commit_name = NULL;
@@ -2803,7 +2801,7 @@ void setup_scoreboard(struct blame_scoreboard *sb,
 		setup_work_tree();
 		sb->final = fake_working_tree_commit(sb->repo,
 						     &sb->revs->diffopt,
-						     path, sb->contents_from);
+						     sb->path, sb->contents_from);
 		add_pending_object(sb->revs, &(sb->final->object), ":");
 	}
 
@@ -2846,12 +2844,12 @@ void setup_scoreboard(struct blame_scoreboard *sb,
 		sb->final_buf_size = o->file.size;
 	}
 	else {
-		o = get_origin(sb->final, path);
+		o = get_origin(sb->final, sb->path);
 		if (fill_blob_sha1_and_mode(sb->repo, o))
-			die(_("no such path %s in %s"), path, final_commit_name);
+			die(_("no such path %s in %s"), sb->path, final_commit_name);
 
 		if (sb->revs->diffopt.flags.allow_textconv &&
-		    textconv_object(sb->repo, path, o->mode, &o->blob_oid, 1, (char **) &sb->final_buf,
+		    textconv_object(sb->repo, sb->path, o->mode, &o->blob_oid, 1, (char **) &sb->final_buf,
 				    &sb->final_buf_size))
 			;
 		else
@@ -2861,7 +2859,7 @@ void setup_scoreboard(struct blame_scoreboard *sb,
 		if (!sb->final_buf)
 			die(_("cannot read blob %s for path %s"),
 			    oid_to_hex(&o->blob_oid),
-			    path);
+			    sb->path);
 	}
 	sb->num_read_blob++;
 	prepare_lines(sb);
@@ -2888,26 +2886,27 @@ struct blame_entry *blame_entry_prepend(struct blame_entry *head,
 	return new_head;
 }
 
-void setup_blame_bloom_data(struct blame_scoreboard *sb,
-			    const char *path)
+void setup_blame_bloom_data(struct blame_scoreboard *sb)
 {
 	struct blame_bloom_data *bd;
+	struct bloom_filter_settings *bs;
 
 	if (!sb->repo->objects->commit_graph)
 		return;
 
-	if (!sb->repo->objects->commit_graph->bloom_filter_settings)
+	bs = get_bloom_filter_settings(sb->repo);
+	if (!bs)
 		return;
 
 	bd = xmalloc(sizeof(struct blame_bloom_data));
 
-	bd->settings = sb->repo->objects->commit_graph->bloom_filter_settings;
+	bd->settings = bs;
 
 	bd->alloc = 4;
 	bd->nr = 0;
 	ALLOC_ARRAY(bd->keys, bd->alloc);
 
-	add_bloom_key(bd, path);
+	add_bloom_key(bd, sb->path);
 
 	sb->bloom_data = bd;
 }

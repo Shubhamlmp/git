@@ -32,11 +32,6 @@ test_set_editor () {
 	export EDITOR
 }
 
-test_set_index_version () {
-    GIT_INDEX_VERSION="$1"
-    export GIT_INDEX_VERSION
-}
-
 test_decode_color () {
 	awk '
 		function name(n) {
@@ -116,13 +111,6 @@ remove_cr () {
 	tr '\015' Q | sed -e 's/Q$//'
 }
 
-# Generate an output of $1 bytes of all zeroes (NULs, not ASCII zeroes).
-# If $1 is 'infinity', output forever or until the receiving pipe stops reading,
-# whichever comes first.
-generate_zero_bytes () {
-	test-tool genzeros "$@"
-}
-
 # In some bourne shell implementations, the "unset" builtin returns
 # nonzero status when a variable to be unset was not set in the first
 # place.
@@ -178,33 +166,59 @@ debug () {
 	GIT_DEBUGGER="${GIT_DEBUGGER}" "$@" <&6 >&5 2>&7
 }
 
-# Call test_commit with the arguments
-# [-C <directory>] <message> [<file> [<contents> [<tag>]]]"
+# Usage: test_commit [options] <message> [<file> [<contents> [<tag>]]]
+#   -C <dir>:
+#	Run all git commands in directory <dir>
+#   --notick
+#	Do not call test_tick before making a commit
+#   --append
+#	Use "echo >>" instead of "echo >" when writing "<contents>" to
+#	"<file>"
+#   --signoff
+#	Invoke "git commit" with --signoff
+#   --author <author>
+#	Invoke "git commit" with --author <author>
 #
 # This will commit a file with the given contents and the given commit
 # message, and tag the resulting commit with the given tag name.
 #
 # <file>, <contents>, and <tag> all default to <message>.
-#
-# If the first argument is "-C", the second argument is used as a path for
-# the git invocations.
 
 test_commit () {
 	notick= &&
+	append= &&
+	author= &&
 	signoff= &&
 	indir= &&
+	no_tag= &&
 	while test $# != 0
 	do
 		case "$1" in
 		--notick)
 			notick=yes
 			;;
+		--append)
+			append=yes
+			;;
+		--author)
+			author="$2"
+			shift
+			;;
 		--signoff)
 			signoff="$1"
+			;;
+		--date)
+			notick=yes
+			GIT_COMMITTER_DATE="$2"
+			GIT_AUTHOR_DATE="$2"
+			shift
 			;;
 		-C)
 			indir="$2"
 			shift
+			;;
+		--no-tag)
+			no_tag=yes
 			;;
 		*)
 			break
@@ -214,14 +228,24 @@ test_commit () {
 	done &&
 	indir=${indir:+"$indir"/} &&
 	file=${2:-"$1.t"} &&
-	echo "${3-$1}" > "$indir$file" &&
+	if test -n "$append"
+	then
+		echo "${3-$1}" >>"$indir$file"
+	else
+		echo "${3-$1}" >"$indir$file"
+	fi &&
 	git ${indir:+ -C "$indir"} add "$file" &&
 	if test -z "$notick"
 	then
 		test_tick
 	fi &&
-	git ${indir:+ -C "$indir"} commit $signoff -m "$1" &&
-	git ${indir:+ -C "$indir"} tag "${4:-$1}"
+	git ${indir:+ -C "$indir"} commit \
+	    ${author:+ --author "$author"} \
+	    $signoff -m "$1" &&
+	if test -z "$no_tag"
+	then
+		git ${indir:+ -C "$indir"} tag "${4:-$1}"
+	fi
 }
 
 # Call test_merge with the arguments "<message> <commit>", where <commit>
@@ -367,9 +391,14 @@ test_chmod () {
 	git update-index --add "--chmod=$@"
 }
 
-# Get the modebits from a file.
+# Get the modebits from a file or directory, ignoring the setgid bit (g+s).
+# This bit is inherited by subdirectories at their creation. So we remove it
+# from the returning string to prevent callers from having to worry about the
+# state of the bit in the test directory.
+#
 test_modebits () {
-	ls -l "$1" | sed -e 's|^\(..........\).*|\1|'
+	ls -ld "$1" | sed -e 's|^\(..........\).*|\1|' \
+			  -e 's|^\(......\)S|\1-|' -e 's|^\(......\)s|\1x|'
 }
 
 # Unset a configuration variable, but don't fail if it doesn't exist.
@@ -423,7 +452,7 @@ write_script () {
 # - Explicitly using test_have_prereq.
 #
 # - Implicitly by specifying the prerequisite tag in the calls to
-#   test_expect_{success,failure,code}.
+#   test_expect_{success,failure} and test_external{,_without_stderr}.
 #
 # The single parameter is the prerequisite tag (a simple word, in all
 # capital letters by convention).
@@ -474,15 +503,15 @@ test_lazy_prereq () {
 
 test_run_lazy_prereq_ () {
 	script='
-mkdir -p "$TRASH_DIRECTORY/prereq-test-dir" &&
+mkdir -p "$TRASH_DIRECTORY/prereq-test-dir-'"$1"'" &&
 (
-	cd "$TRASH_DIRECTORY/prereq-test-dir" &&'"$2"'
+	cd "$TRASH_DIRECTORY/prereq-test-dir-'"$1"'" &&'"$2"'
 )'
 	say >&3 "checking prerequisite: $1"
 	say >&3 "$script"
 	test_eval_ "$script"
 	eval_ret=$?
-	rm -rf "$TRASH_DIRECTORY/prereq-test-dir"
+	rm -rf "$TRASH_DIRECTORY/prereq-test-dir-$1"
 	if test "$eval_ret" = 0; then
 		say >&3 "prerequisite $1 ok"
 	else
@@ -701,34 +730,37 @@ test_external_without_stderr () {
 }
 
 # debugging-friendly alternatives to "test [-f|-d|-e]"
-# The commands test the existence or non-existence of $1. $2 can be
-# given to provide a more precise diagnosis.
+# The commands test the existence or non-existence of $1
 test_path_is_file () {
+	test "$#" -ne 1 && BUG "1 param"
 	if ! test -f "$1"
 	then
-		echo "File $1 doesn't exist. $2"
+		echo "File $1 doesn't exist"
 		false
 	fi
 }
 
 test_path_is_dir () {
+	test "$#" -ne 1 && BUG "1 param"
 	if ! test -d "$1"
 	then
-		echo "Directory $1 doesn't exist. $2"
+		echo "Directory $1 doesn't exist"
 		false
 	fi
 }
 
 test_path_exists () {
+	test "$#" -ne 1 && BUG "1 param"
 	if ! test -e "$1"
 	then
-		echo "Path $1 doesn't exist. $2"
+		echo "Path $1 doesn't exist"
 		false
 	fi
 }
 
 # Check if the directory exists and is empty as expected, barf otherwise.
 test_dir_is_empty () {
+	test "$#" -ne 1 && BUG "1 param"
 	test_path_is_dir "$1" &&
 	if test -n "$(ls -a1 "$1" | egrep -v '^\.\.?$')"
 	then
@@ -740,6 +772,7 @@ test_dir_is_empty () {
 
 # Check if the file exists and has a size greater than zero
 test_file_not_empty () {
+	test "$#" = 2 && BUG "2 param"
 	if ! test -s "$1"
 	then
 		echo "'$1' is not a non-empty file."
@@ -748,6 +781,7 @@ test_file_not_empty () {
 }
 
 test_path_is_missing () {
+	test "$#" -ne 1 && BUG "1 param"
 	if test -e "$1"
 	then
 		echo "Path exists:"
@@ -781,6 +815,11 @@ test_line_count () {
 		cat "$3"
 		return 1
 	fi
+}
+
+test_file_size () {
+	test "$#" -ne 1 && BUG "1 param"
+	test-tool path-utils file-size "$1"
 }
 
 # Returns success if a comma separated string of keywords ($1) contains a
@@ -820,7 +859,7 @@ test_must_fail_acceptable () {
 	fi
 
 	case "$1" in
-	git|__git*|test-tool|test-svn-fe|test_terminal)
+	git|__git*|test-tool|test_terminal)
 		return 0
 		;;
 	*)
@@ -951,14 +990,9 @@ test_expect_code () {
 # - cmp's output is not nearly as easy to read as diff -u
 # - not all diff versions understand "-u"
 
-test_cmp() {
-	test $# -eq 2 || BUG "test_cmp requires two arguments"
-	if ! eval "$GIT_TEST_CMP" '"$@"'
-	then
-		test "x$1" = x- || test -e "$1" || BUG "test_cmp '$1' missing"
-		test "x$2" = x- || test -e "$2" || BUG "test_cmp '$2' missing"
-		return 1
-	fi
+test_cmp () {
+	test "$#" -ne 2 && BUG "2 param"
+	eval "$GIT_TEST_CMP" '"$@"'
 }
 
 # Check that the given config key has the expected value.
@@ -970,7 +1004,7 @@ test_cmp() {
 #
 #    test_cmp_config foo core.bar
 #
-test_cmp_config() {
+test_cmp_config () {
 	local GD &&
 	if test "$1" = "-C"
 	then
@@ -986,29 +1020,14 @@ test_cmp_config() {
 
 # test_cmp_bin - helper to compare binary files
 
-test_cmp_bin() {
-	test $# -eq 2 || BUG "test_cmp_bin requires two arguments"
-	if ! cmp "$@"
-	then
-		test "x$1" = x- || test -e "$1" || BUG "test_cmp_bin '$1' missing"
-		test "x$2" = x- || test -e "$2" || BUG "test_cmp_bin '$2' missing"
-		return 1
-	fi
+test_cmp_bin () {
+	test "$#" -ne 2 && BUG "2 param"
+	cmp "$@"
 }
 
-# Use this instead of test_cmp to compare files that contain expected and
-# actual output from git commands that can be translated.  When running
-# under GIT_TEST_GETTEXT_POISON this pretends that the command produced expected
-# results.
-test_i18ncmp () {
-	! test_have_prereq C_LOCALE_OUTPUT || test_cmp "$@"
-}
-
-# Use this instead of "grep expected-string actual" to see if the
-# output from a git command that can be translated either contains an
-# expected string, or does not contain an unwanted one.  When running
-# under GIT_TEST_GETTEXT_POISON this pretends that the command produced expected
-# results.
+# Wrapper for grep which used to be used for
+# GIT_TEST_GETTEXT_POISON=false. Only here as a shim for other
+# in-flight changes. Should not be used and will be removed soon.
 test_i18ngrep () {
 	eval "last_arg=\${$#}"
 
@@ -1019,12 +1038,6 @@ test_i18ngrep () {
 	   { test "x!" = "x$1" && test $# -lt 3 ; }
 	then
 		BUG "too few parameters to test_i18ngrep"
-	fi
-
-	if test_have_prereq !C_LOCALE_OUTPUT
-	then
-		# pretend success
-		return 0
 	fi
 
 	if test "x!" = "x$1"
@@ -1062,6 +1075,7 @@ verbose () {
 # otherwise.
 
 test_must_be_empty () {
+	test "$#" -ne 1 && BUG "1 param"
 	test_path_is_file "$1" &&
 	if test -s "$1"
 	then
@@ -1085,7 +1099,7 @@ test_cmp_rev () {
 	fi
 	if test $# != 2
 	then
-		error "bug in the test script: test_cmp_rev requires two revisions, but got $#"
+		BUG "test_cmp_rev requires two revisions, but got $#"
 	else
 		local r1 r2
 		r1=$(git rev-parse --verify "$1") &&
@@ -1196,7 +1210,7 @@ test_atexit () {
 	# doing so on Bash is better than nothing (the test will
 	# silently pass on other shells).
 	test "${BASH_SUBSHELL-0}" = 0 ||
-	error "bug in test script: test_atexit does nothing in a subshell"
+	BUG "test_atexit does nothing in a subshell"
 	test_atexit_cleanup="{ $*
 		} && (exit \"\$eval_ret\"); eval_ret=\$?; $test_atexit_cleanup"
 }
@@ -1210,7 +1224,9 @@ test_create_repo () {
 	mkdir -p "$repo"
 	(
 		cd "$repo" || error "Cannot setup test environment"
-		"${GIT_TEST_INSTALLED:-$GIT_EXEC_PATH}/git$X" init \
+		"${GIT_TEST_INSTALLED:-$GIT_EXEC_PATH}/git$X" -c \
+			init.defaultBranch="${GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME-master}" \
+			init \
 			"--template=$GIT_BUILD_DIR/templates/blt/" >&3 2>&4 ||
 		error "cannot run git init -- have you built things yet?"
 		mv .git/hooks .git/hooks-disabled
@@ -1426,7 +1442,7 @@ nongit () {
 # whitespace and put in a single packet. Note that data containing NULs must be
 # given on stdin, and that empty input becomes an empty packet, not a flush
 # packet (for that you can just print 0000 yourself).
-packetize() {
+packetize () {
 	if test $# -gt 0
 	then
 		packet="$*"
@@ -1592,33 +1608,6 @@ test_set_port () {
 	eval $var=$port
 }
 
-# Compare a file containing rev-list bitmap traversal output to its non-bitmap
-# counterpart. You can't just use test_cmp for this, because the two produce
-# subtly different output:
-#
-#   - regular output is in traversal order, whereas bitmap is split by type,
-#     with non-packed objects at the end
-#
-#   - regular output has a space and the pathname appended to non-commit
-#     objects; bitmap output omits this
-#
-# This function normalizes and compares the two. The second file should
-# always be the bitmap output.
-test_bitmap_traversal () {
-	if test "$1" = "--no-confirm-bitmaps"
-	then
-		shift
-	elif cmp "$1" "$2"
-	then
-		echo >&2 "identical raw outputs; are you sure bitmaps were used?"
-		return 1
-	fi &&
-	cut -d' ' -f1 "$1" | sort >"$1.normalized" &&
-	sort "$2" >"$2.normalized" &&
-	test_cmp "$1.normalized" "$2.normalized" &&
-	rm -f "$1.normalized" "$2.normalized"
-}
-
 # Tests for the hidden file attribute on Windows
 test_path_is_hidden () {
 	test_have_prereq MINGW ||
@@ -1627,4 +1616,79 @@ test_path_is_hidden () {
 	# Use the output of `attrib`, ignore the absolute path
 	case "$("$SYSTEMROOT"/system32/attrib "$1")" in *H*?:*) return 0;; esac
 	return 1
+}
+
+# Check that the given command was invoked as part of the
+# trace2-format trace on stdin.
+#
+#	test_subcommand [!] <command> <args>... < <trace>
+#
+# For example, to look for an invocation of "git upload-pack
+# /path/to/repo"
+#
+#	GIT_TRACE2_EVENT=event.log git fetch ... &&
+#	test_subcommand git upload-pack "$PATH" <event.log
+#
+# If the first parameter passed is !, this instead checks that
+# the given command was not called.
+#
+test_subcommand () {
+	local negate=
+	if test "$1" = "!"
+	then
+		negate=t
+		shift
+	fi
+
+	local expr=$(printf '"%s",' "$@")
+	expr="${expr%,}"
+
+	if test -n "$negate"
+	then
+		! grep "\[$expr\]"
+	else
+		grep "\[$expr\]"
+	fi
+}
+
+# Check that the given command was invoked as part of the
+# trace2-format trace on stdin.
+#
+#	test_region [!] <category> <label> git <command> <args>...
+#
+# For example, to look for trace2_region_enter("index", "do_read_index", repo)
+# in an invocation of "git checkout HEAD~1", run
+#
+#	GIT_TRACE2_EVENT="$(pwd)/trace.txt" GIT_TRACE2_EVENT_NESTING=10 \
+#		git checkout HEAD~1 &&
+#	test_region index do_read_index <trace.txt
+#
+# If the first parameter passed is !, this instead checks that
+# the given region was not entered.
+#
+test_region () {
+	local expect_exit=0
+	if test "$1" = "!"
+	then
+		expect_exit=1
+		shift
+	fi
+
+	grep -e	'"region_enter".*"category":"'"$1"'","label":"'"$2"\" "$3"
+	exitcode=$?
+
+	if test $exitcode != $expect_exit
+	then
+		return 1
+	fi
+
+	grep -e	'"region_leave".*"category":"'"$1"'","label":"'"$2"\" "$3"
+	exitcode=$?
+
+	if test $exitcode != $expect_exit
+	then
+		return 1
+	fi
+
+	return 0
 }

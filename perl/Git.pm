@@ -9,7 +9,7 @@ package Git;
 
 use 5.008;
 use strict;
-use warnings;
+use warnings $ENV{GIT_PERL_FATAL_WARNINGS} ? qw(FATAL all) : ();
 
 use File::Temp ();
 use File::Spec ();
@@ -619,6 +619,19 @@ Return path to the git repository. Must be called on a repository instance.
 
 sub repo_path { $_[0]->{opts}->{Repository} }
 
+=item hooks_path ()
+
+Return path to the hooks directory. Must be called on a repository instance.
+
+=cut
+
+sub hooks_path {
+	my ($self) = @_;
+
+	my $dir = $self->command_oneline('rev-parse', '--git-path', 'hooks');
+	my $abs = abs_path($dir);
+	return $abs;
+}
 
 =item wc_path ()
 

@@ -482,14 +482,14 @@ int git_diff_basic_config(const char *var, const char *value, void *cb)
 
 static char *quote_two(const char *one, const char *two)
 {
-	int need_one = quote_c_style(one, NULL, NULL, 1);
-	int need_two = quote_c_style(two, NULL, NULL, 1);
+	int need_one = quote_c_style(one, NULL, NULL, CQUOTE_NODQ);
+	int need_two = quote_c_style(two, NULL, NULL, CQUOTE_NODQ);
 	struct strbuf res = STRBUF_INIT;
 
 	if (need_one + need_two) {
 		strbuf_addch(&res, '"');
-		quote_c_style(one, &res, NULL, 1);
-		quote_c_style(two, &res, NULL, 1);
+		quote_c_style(one, &res, NULL, CQUOTE_NODQ);
+		quote_c_style(two, &res, NULL, CQUOTE_NODQ);
 		strbuf_addch(&res, '"');
 	} else {
 		strbuf_addstr(&res, one);
@@ -2233,14 +2233,12 @@ static void init_diff_words_data(struct emit_callback *ecbdata,
 	struct diff_options *o = xmalloc(sizeof(struct diff_options));
 	memcpy(o, orig_opts, sizeof(struct diff_options));
 
-	ecbdata->diff_words =
-		xcalloc(1, sizeof(struct diff_words_data));
+	CALLOC_ARRAY(ecbdata->diff_words, 1);
 	ecbdata->diff_words->type = o->word_diff;
 	ecbdata->diff_words->opt = o;
 
 	if (orig_opts->emitted_symbols)
-		o->emitted_symbols =
-			xcalloc(1, sizeof(struct emitted_diff_symbols));
+		CALLOC_ARRAY(o->emitted_symbols, 1);
 
 	if (!o->word_regex)
 		o->word_regex = userdiff_word_regex(one, o->repo->index);
@@ -2509,7 +2507,7 @@ static struct diffstat_file *diffstat_add(struct diffstat_t *diffstat,
 					  const char *name_b)
 {
 	struct diffstat_file *x;
-	x = xcalloc(1, sizeof(*x));
+	CALLOC_ARRAY(x, 1);
 	ALLOC_GROW(diffstat->files, diffstat->nr + 1, diffstat->alloc);
 	diffstat->files[diffstat->nr++] = x;
 	if (name_b) {
@@ -3153,16 +3151,19 @@ static void show_dirstat_by_line(struct diffstat_t *data, struct diff_options *o
 	gather_dirstat(options, &dir, changed, "", 0);
 }
 
+static void free_diffstat_file(struct diffstat_file *f)
+{
+	free(f->print_name);
+	free(f->name);
+	free(f->from_name);
+	free(f);
+}
+
 void free_diffstat_info(struct diffstat_t *diffstat)
 {
 	int i;
-	for (i = 0; i < diffstat->nr; i++) {
-		struct diffstat_file *f = diffstat->files[i];
-		free(f->print_name);
-		free(f->name);
-		free(f->from_name);
-		free(f);
-	}
+	for (i = 0; i < diffstat->nr; i++)
+		free_diffstat_file(diffstat->files[i]);
 	free(diffstat->files);
 }
 
@@ -3429,7 +3430,7 @@ static void builtin_diff(const char *name_a,
 	if (o->submodule_format == DIFF_SUBMODULE_LOG &&
 	    (!one->mode || S_ISGITLINK(one->mode)) &&
 	    (!two->mode || S_ISGITLINK(two->mode))) {
-		show_submodule_summary(o, one->path ? one->path : two->path,
+		show_submodule_diff_summary(o, one->path ? one->path : two->path,
 				&one->oid, &two->oid,
 				two->dirty_submodule);
 		return;
@@ -3584,6 +3585,8 @@ static void builtin_diff(const char *name_a,
 		if (header.len && !o->flags.suppress_diff_headers)
 			ecbdata.header = &header;
 		xpp.flags = o->xdl_opts;
+		xpp.ignore_regex = o->ignore_regex;
+		xpp.ignore_regex_nr = o->ignore_regex_nr;
 		xpp.anchors = o->anchors;
 		xpp.anchors_nr = o->anchors_nr;
 		xecfg.ctxlen = o->context;
@@ -3660,7 +3663,7 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 {
 	mmfile_t mf1, mf2;
 	struct diffstat_file *data;
-	int same_contents;
+	int may_differ;
 	int complete_rewrite = 0;
 
 	if (!DIFF_PAIR_UNMERGED(p)) {
@@ -3678,12 +3681,14 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		return;
 	}
 
-	same_contents = oideq(&one->oid, &two->oid);
+	/* saves some reads if true, not a guarantee of diff outcome */
+	may_differ = !(one->oid_valid && two->oid_valid &&
+			oideq(&one->oid, &two->oid));
 
 	if (diff_filespec_is_binary(o->repo, one) ||
 	    diff_filespec_is_binary(o->repo, two)) {
 		data->is_binary = 1;
-		if (same_contents) {
+		if (!may_differ) {
 			data->added = 0;
 			data->deleted = 0;
 		} else {
@@ -3699,7 +3704,7 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		data->added = count_lines(two->data, two->size);
 	}
 
-	else if (!same_contents) {
+	else if (may_differ) {
 		/* Crazy xdl interfaces.. */
 		xpparam_t xpp;
 		xdemitconf_t xecfg;
@@ -3711,6 +3716,8 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		memset(&xpp, 0, sizeof(xpp));
 		memset(&xecfg, 0, sizeof(xecfg));
 		xpp.flags = o->xdl_opts;
+		xpp.ignore_regex = o->ignore_regex;
+		xpp.ignore_regex_nr = o->ignore_regex_nr;
 		xpp.anchors = o->anchors;
 		xpp.anchors_nr = o->anchors_nr;
 		xecfg.ctxlen = o->context;
@@ -3718,6 +3725,27 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		if (xdi_diff_outf(&mf1, &mf2, discard_hunk_line,
 				  diffstat_consume, diffstat, &xpp, &xecfg))
 			die("unable to generate diffstat for %s", one->path);
+
+		if (DIFF_FILE_VALID(one) && DIFF_FILE_VALID(two)) {
+			struct diffstat_file *file =
+				diffstat->files[diffstat->nr - 1];
+			/*
+			 * Omit diffstats of modified files where nothing changed.
+			 * Even if may_differ, this might be the case due to
+			 * ignoring whitespace changes, etc.
+			 *
+			 * But note that we special-case additions, deletions,
+			 * renames, and mode changes as adding an empty file,
+			 * for example is still of interest.
+			 */
+			if ((p->status == DIFF_STATUS_MODIFIED)
+				&& !file->added
+				&& !file->deleted
+				&& one->mode == two->mode) {
+				free_diffstat_file(file);
+				diffstat->nr--;
+			}
+		}
 	}
 
 	diff_free_filespec_data(one);
@@ -4085,6 +4113,9 @@ void diff_free_filespec_blob(struct diff_filespec *s)
 
 void diff_free_filespec_data(struct diff_filespec *s)
 {
+	if (!s)
+		return;
+
 	diff_free_filespec_blob(s);
 	FREE_AND_NULL(s->cnt_data);
 }
@@ -4560,6 +4591,9 @@ void repo_diff_setup(struct repository *r, struct diff_options *options)
 
 	options->orderfile = diff_order_file_cfg;
 
+	if (!options->flags.ignore_submodule_set)
+		options->flags.ignore_untracked_in_submodules = 1;
+
 	if (diff_no_prefix) {
 		options->a_prefix = options->b_prefix = "";
 	} else if (!diff_mnemonic_prefix) {
@@ -4601,7 +4635,8 @@ void diff_setup_done(struct diff_options *options)
 	 * inside contents.
 	 */
 
-	if ((options->xdl_opts & XDF_WHITESPACE_FLAGS))
+	if ((options->xdl_opts & XDF_WHITESPACE_FLAGS) ||
+	    options->ignore_regex_nr)
 		options->flags.diff_from_contents = 1;
 	else
 		options->flags.diff_from_contents = 0;
@@ -4881,7 +4916,7 @@ static int diff_opt_find_object(const struct option *option,
 		return error(_("unable to resolve '%s'"), arg);
 
 	if (!opt->objfind)
-		opt->objfind = xcalloc(1, sizeof(*opt->objfind));
+		CALLOC_ARRAY(opt->objfind, 1);
 
 	opt->pickaxe_opts |= DIFF_PICKAXE_KIND_OBJFIND;
 	opt->flags.recursive = 1;
@@ -5177,6 +5212,22 @@ static int diff_opt_patience(const struct option *opt,
 	return 0;
 }
 
+static int diff_opt_ignore_regex(const struct option *opt,
+				 const char *arg, int unset)
+{
+	struct diff_options *options = opt->value;
+	regex_t *regex;
+
+	BUG_ON_OPT_NEG(unset);
+	regex = xmalloc(sizeof(*regex));
+	if (regcomp(regex, arg, REG_EXTENDED | REG_NEWLINE))
+		return error(_("invalid regex given to -I: '%s'"), arg);
+	ALLOC_GROW(options->ignore_regex, options->ignore_regex_nr + 1,
+		   options->ignore_regex_alloc);
+	options->ignore_regex[options->ignore_regex_nr++] = regex;
+	return 0;
+}
+
 static int diff_opt_pickaxe_regex(const struct option *opt,
 				  const char *arg, int unset)
 {
@@ -5292,6 +5343,19 @@ static int diff_opt_word_diff_regex(const struct option *opt,
 	if (options->word_diff == DIFF_WORDS_NONE)
 		options->word_diff = DIFF_WORDS_PLAIN;
 	options->word_regex = arg;
+	return 0;
+}
+
+static int diff_opt_rotate_to(const struct option *opt, const char *arg, int unset)
+{
+	struct diff_options *options = opt->value;
+
+	BUG_ON_OPT_NEG(unset);
+	if (!strcmp(opt->long_name, "skip-to"))
+		options->skip_instead_of_rotate = 1;
+	else
+		options->skip_instead_of_rotate = 0;
+	options->rotate_to = arg;
 	return 0;
 }
 
@@ -5465,6 +5529,9 @@ static void prep_parse_options(struct diff_options *options)
 		OPT_BIT_F(0, "ignore-blank-lines", &options->xdl_opts,
 			  N_("ignore changes whose lines are all blank"),
 			  XDF_IGNORE_BLANK_LINES, PARSE_OPT_NONEG),
+		OPT_CALLBACK_F('I', "ignore-matching-lines", options, N_("<regex>"),
+			       N_("ignore changes whose all lines match <regex>"),
+			       0, diff_opt_ignore_regex),
 		OPT_BIT(0, "indent-heuristic", &options->xdl_opts,
 			N_("heuristic to shift diff hunk boundaries for easy reading"),
 			XDF_INDENT_HEURISTIC),
@@ -5543,6 +5610,12 @@ static void prep_parse_options(struct diff_options *options)
 			  DIFF_PICKAXE_REGEX, PARSE_OPT_NONEG),
 		OPT_FILENAME('O', NULL, &options->orderfile,
 			     N_("control the order in which files appear in the output")),
+		OPT_CALLBACK_F(0, "rotate-to", options, N_("<path>"),
+			       N_("show the change in the specified path first"),
+			       PARSE_OPT_NONEG, diff_opt_rotate_to),
+		OPT_CALLBACK_F(0, "skip-to", options, N_("<path>"),
+			       N_("skip the output to the specified path"),
+			       PARSE_OPT_NONEG, diff_opt_rotate_to),
 		OPT_CALLBACK_F(0, "find-object", options, N_("<object-id>"),
 			       N_("look for differences that change the number of occurrences of the specified object"),
 			       PARSE_OPT_NONEG, diff_opt_find_object),
@@ -6263,9 +6336,9 @@ static void diff_flush_patch_all_file_pairs(struct diff_options *o)
 			if (o->color_moved == COLOR_MOVED_ZEBRA_DIM)
 				dim_moved_lines(o);
 
-			hashmap_free_entries(&add_lines, struct moved_entry,
+			hashmap_clear_and_free(&add_lines, struct moved_entry,
 						ent);
-			hashmap_free_entries(&del_lines, struct moved_entry,
+			hashmap_clear_and_free(&del_lines, struct moved_entry,
 						ent);
 		}
 
@@ -6278,6 +6351,32 @@ static void diff_flush_patch_all_file_pairs(struct diff_options *o)
 
 		o->emitted_symbols = NULL;
 	}
+}
+
+static void diff_free_file(struct diff_options *options)
+{
+	if (options->close_file)
+		fclose(options->file);
+}
+
+static void diff_free_ignore_regex(struct diff_options *options)
+{
+	int i;
+
+	for (i = 0; i < options->ignore_regex_nr; i++) {
+		regfree(options->ignore_regex[i]);
+		free(options->ignore_regex[i]);
+	}
+	free(options->ignore_regex);
+}
+
+void diff_free(struct diff_options *options)
+{
+	if (options->no_free)
+		return;
+
+	diff_free_file(options);
+	diff_free_ignore_regex(options);
 }
 
 void diff_flush(struct diff_options *options)
@@ -6343,8 +6442,7 @@ void diff_flush(struct diff_options *options)
 		 * options->file to /dev/null should be safe, because we
 		 * aren't supposed to produce any output anyway.
 		 */
-		if (options->close_file)
-			fclose(options->file);
+		diff_free_file(options);
 		options->file = xfopen("/dev/null", "w");
 		options->close_file = 1;
 		options->color_moved = 0;
@@ -6377,8 +6475,7 @@ void diff_flush(struct diff_options *options)
 free_queue:
 	free(q->queue);
 	DIFF_QUEUE_CLEAR(q);
-	if (options->close_file)
-		fclose(options->file);
+	diff_free(options);
 
 	/*
 	 * Report the content-level differences with HAS_CHANGES;
@@ -6613,6 +6710,8 @@ void diffcore_std(struct diff_options *options)
 		diffcore_pickaxe(options);
 	if (options->orderfile)
 		diffcore_order(options->orderfile);
+	if (options->rotate_to)
+		diffcore_rotate(options);
 	if (!options->found_follow)
 		/* See try_to_follow_renames() in tree-diff.c */
 		diff_resolve_rename_copy();

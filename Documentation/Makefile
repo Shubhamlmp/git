@@ -21,6 +21,7 @@ MAN1_TXT += gitweb.txt
 MAN5_TXT += gitattributes.txt
 MAN5_TXT += githooks.txt
 MAN5_TXT += gitignore.txt
+MAN5_TXT += gitmailmap.txt
 MAN5_TXT += gitmodules.txt
 MAN5_TXT += gitrepository-layout.txt
 MAN5_TXT += gitweb.conf.txt
@@ -75,6 +76,7 @@ SP_ARTICLES += howto/rebuild-from-update-hook
 SP_ARTICLES += howto/rebase-from-internal-branch
 SP_ARTICLES += howto/keep-canonical-history-correct
 SP_ARTICLES += howto/maintain-git
+SP_ARTICLES += howto/coordinate-embargoed-releases
 API_DOCS = $(patsubst %.txt,%,$(filter-out technical/api-index-skel.txt technical/api-index.txt, $(wildcard technical/api-*.txt)))
 SP_ARTICLES += $(API_DOCS)
 
@@ -89,6 +91,7 @@ TECH_DOCS += technical/multi-pack-index
 TECH_DOCS += technical/pack-format
 TECH_DOCS += technical/pack-heuristics
 TECH_DOCS += technical/pack-protocol
+TECH_DOCS += technical/parallel-checkout
 TECH_DOCS += technical/partial-clone
 TECH_DOCS += technical/protocol-capabilities
 TECH_DOCS += technical/protocol-common
@@ -272,7 +275,9 @@ install-html: html
 ../GIT-VERSION-FILE: FORCE
 	$(QUIET_SUBDIR0)../ $(QUIET_SUBDIR1) GIT-VERSION-FILE
 
+ifneq ($(MAKECMDGOALS),clean)
 -include ../GIT-VERSION-FILE
+endif
 
 #
 # Determine "include::" file references in asciidoc files.
@@ -286,7 +291,9 @@ doc.dep : $(docdep_prereqs) $(wildcard *.txt) $(wildcard config/*.txt) build-doc
 	$(PERL_PATH) ./build-docdep.perl >$@+ $(QUIET_STDERR) && \
 	mv $@+ $@
 
+ifneq ($(MAKECMDGOALS),clean)
 -include doc.dep
+endif
 
 cmds_txt = cmds-ancillaryinterrogators.txt \
 	cmds-ancillarymanipulators.txt \
@@ -380,7 +387,10 @@ SubmittingPatches.txt: SubmittingPatches
 	$(QUIET_GEN) cp $< $@
 
 XSLT = docbook.xsl
-XSLTOPTS = --xinclude --stringparam html.stylesheet docbook-xsl.css
+XSLTOPTS =
+XSLTOPTS += --xinclude
+XSLTOPTS += --stringparam html.stylesheet docbook-xsl.css
+XSLTOPTS += --param generate.consistent.ids 1
 
 user-manual.html: user-manual.xml $(XSLT)
 	$(QUIET_XSLTPROC)$(RM) $@+ $@ && \

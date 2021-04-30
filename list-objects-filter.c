@@ -21,7 +21,7 @@
  * in the traversal (until we mark it SEEN).  This is a way to
  * let us silently de-dup calls to show() in the caller.  This
  * is subtly different from the "revision.h:SHOWN" and the
- * "sha1-name.c:ONELINE_SEEN" bits.  And also different from
+ * "object-name.c:ONELINE_SEEN" bits.  And also different from
  * the non-de-dup usage in pack-bitmap.c
  */
 #define FILTER_SHOWN_BUT_REVISIT (1<<21)
@@ -186,7 +186,7 @@ static enum list_objects_filter_result filter_trees_depth(
 		seen_info = oidmap_get(
 			&filter_data->seen_at_depth, &obj->oid);
 		if (!seen_info) {
-			seen_info = xcalloc(1, sizeof(*seen_info));
+			CALLOC_ARRAY(seen_info, 1);
 			oidcpy(&seen_info->base.oid, &obj->oid);
 			seen_info->depth = filter_data->current_depth;
 			oidmap_put(&filter_data->seen_at_depth, seen_info);
@@ -626,7 +626,7 @@ static void filter_combine__init(
 	size_t sub;
 
 	d->nr = filter_options->sub_nr;
-	d->sub = xcalloc(d->nr, sizeof(*d->sub));
+	CALLOC_ARRAY(d->sub, d->nr);
 	for (sub = 0; sub < d->nr; sub++)
 		d->sub[sub].filter = list_objects_filter__init(
 			filter->omits ? &d->sub[sub].omits : NULL,
@@ -674,7 +674,7 @@ struct filter *list_objects_filter__init(
 	if (!init_fn)
 		return NULL;
 
-	filter = xcalloc(1, sizeof(*filter));
+	CALLOC_ARRAY(filter, 1);
 	filter->omits = omitted;
 	init_fn(filter_options, filter);
 	return filter;

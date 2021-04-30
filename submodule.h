@@ -39,7 +39,7 @@ struct submodule_update_strategy {
 };
 #define SUBMODULE_UPDATE_STRATEGY_INIT {SM_UPDATE_UNSPECIFIED, NULL}
 
-int is_gitmodules_unmerged(const struct index_state *istate);
+int is_gitmodules_unmerged(struct index_state *istate);
 int is_writing_gitmodules_ok(void);
 int is_staging_gitmodules_ok(struct index_state *istate);
 int update_path_in_gitmodules(const char *oldpath, const char *newpath);
@@ -60,16 +60,16 @@ int is_submodule_active(struct repository *repo, const char *path);
  * Otherwise the return error code is the same as of resolve_gitdir_gently.
  */
 int is_submodule_populated_gently(const char *path, int *return_error_code);
-void die_in_unpopulated_submodule(const struct index_state *istate,
+void die_in_unpopulated_submodule(struct index_state *istate,
 				  const char *prefix);
-void die_path_inside_submodule(const struct index_state *istate,
+void die_path_inside_submodule(struct index_state *istate,
 			       const struct pathspec *ps);
 enum submodule_update_type parse_submodule_update_type(const char *value);
 int parse_submodule_update_strategy(const char *value,
 				    struct submodule_update_strategy *dst);
 const char *submodule_strategy_to_string(const struct submodule_update_strategy *s);
 void handle_ignore_submodules_arg(struct diff_options *, const char *);
-void show_submodule_summary(struct diff_options *o, const char *path,
+void show_submodule_diff_summary(struct diff_options *o, const char *path,
 			    struct object_id *one, struct object_id *two,
 			    unsigned dirty_submodule);
 void show_submodule_inline_diff(struct diff_options *o, const char *path,

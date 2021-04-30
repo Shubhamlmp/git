@@ -1,6 +1,8 @@
 #ifndef REFS_H
 #define REFS_H
 
+#include "cache.h"
+
 struct object_id;
 struct ref_store;
 struct repository;
@@ -116,16 +118,16 @@ int is_branch(const char *refname);
 int refs_init_db(struct strbuf *err);
 
 /*
- * If refname is a non-symbolic reference that refers to a tag object,
- * and the tag can be (recursively) dereferenced to a non-tag object,
- * store the object ID of the referred-to object to oid and return 0.
- * If any of these conditions are not met, return a non-zero value.
- * Symbolic references are considered unpeelable, even if they
- * ultimately resolve to a peelable tag.
+ * Return the peeled value of the oid currently being iterated via
+ * for_each_ref(), etc. This is equivalent to calling:
+ *
+ *   peel_object(oid, &peeled);
+ *
+ * with the "oid" value given to the each_ref_fn callback, except
+ * that some ref storage may be able to answer the query without
+ * actually loading the object in memory.
  */
-int refs_peel_ref(struct ref_store *refs, const char *refname,
-		  struct object_id *oid);
-int peel_ref(const char *refname, struct object_id *oid);
+int peel_iterated_oid(const struct object_id *base, struct object_id *peeled);
 
 /**
  * Resolve refname in the nested "gitlink" repository in the specified
@@ -151,9 +153,15 @@ struct strvec;
 void expand_ref_prefix(struct strvec *prefixes, const char *prefix);
 
 int expand_ref(struct repository *r, const char *str, int len, struct object_id *oid, char **ref);
-int repo_dwim_ref(struct repository *r, const char *str, int len, struct object_id *oid, char **ref);
+int repo_dwim_ref(struct repository *r, const char *str, int len,
+		  struct object_id *oid, char **ref, int nonfatal_dangling_mark);
 int repo_dwim_log(struct repository *r, const char *str, int len, struct object_id *oid, char **ref);
-int dwim_ref(const char *str, int len, struct object_id *oid, char **ref);
+static inline int dwim_ref(const char *str, int len, struct object_id *oid,
+			   char **ref, int nonfatal_dangling_mark)
+{
+	return repo_dwim_ref(the_repository, str, len, oid, ref,
+			     nonfatal_dangling_mark);
+}
 int dwim_log(const char *str, int len, struct object_id *oid, char **ref);
 
 /*
@@ -162,8 +170,8 @@ int dwim_log(const char *str, int len, struct object_id *oid, char **ref);
  * The return value of `repo_default_branch_name()` is an allocated string. The
  * return value of `git_default_branch_name()` is a singleton.
  */
-const char *git_default_branch_name(void);
-char *repo_default_branch_name(struct repository *r);
+const char *git_default_branch_name(int quiet);
+char *repo_default_branch_name(struct repository *r, int quiet);
 
 /*
  * A ref_transaction represents a collection of reference updates that
@@ -339,6 +347,15 @@ int refs_for_each_fullref_in(struct ref_store *refs, const char *prefix,
 int for_each_fullref_in(const char *prefix, each_ref_fn fn, void *cb_data,
 			unsigned int broken);
 
+/**
+ * iterate all refs in "patterns" by partitioning patterns into disjoint sets
+ * and iterating the longest-common prefix of each set.
+ *
+ * callers should be prepared to ignore references that they did not ask for.
+ */
+int for_each_fullref_in_prefixes(const char *namespace, const char **patterns,
+				 each_ref_fn fn, void *cb_data,
+				 unsigned int broken);
 /**
  * iterate refs from the respective area.
  */

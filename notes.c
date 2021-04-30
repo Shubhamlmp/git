@@ -452,7 +452,7 @@ static void load_subtree(struct notes_tree *t, struct leaf_node *subtree,
 			goto handle_non_note;
 		}
 
-		l = xcalloc(1, sizeof(*l));
+		CALLOC_ARRAY(l, 1);
 		oidcpy(&l->key_oid, &object_oid);
 		oidcpy(&l->val_oid, &entry.oid);
 		if (note_tree_insert(t, node, n, l, type,
@@ -970,7 +970,7 @@ static int notes_display_config(const char *k, const char *v, void *cb)
 
 	if (*load_refs && !strcmp(k, "notes.displayref")) {
 		if (!v)
-			config_error_nonbool(k);
+			return config_error_nonbool(k);
 		string_list_add_refs_by_glob(&display_notes_refs, v);
 	}
 

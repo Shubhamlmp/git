@@ -23,6 +23,7 @@ test_description="merge cases"
 #                     files that might be renamed into each other's paths.)
 
 . ./test-lib.sh
+. "$TEST_DIRECTORY"/lib-merge.sh
 
 
 ###########################################################################
@@ -491,7 +492,9 @@ test_expect_success '3a-L: bq_1->foo/bq_2 on A, foo/->bar/ on B' '
 		test_cmp expect actual &&
 
 		test_must_fail git rev-parse HEAD:bq HEAD:foo/bq &&
-		test_path_is_missing bq foo/bq foo/whatever
+		test_path_is_missing bq &&
+		test_path_is_missing foo/bq &&
+		test_path_is_missing foo/whatever
 	)
 '
 
@@ -521,7 +524,9 @@ test_expect_success '3a-R: bq_1->foo/bq_2 on A, foo/->bar/ on B' '
 		test_cmp expect actual &&
 
 		test_must_fail git rev-parse HEAD:bq HEAD:foo/bq &&
-		test_path_is_missing bq foo/bq foo/whatever
+		test_path_is_missing bq &&
+		test_path_is_missing foo/bq &&
+		test_path_is_missing foo/whatever
 	)
 '
 
@@ -587,7 +592,9 @@ test_expect_success '3b-L: bq_1->foo/bq_2 on A, foo/->bar/ on B' '
 		test_cmp expect actual &&
 
 		test_must_fail git rev-parse HEAD:bq HEAD:foo/bq &&
-		test_path_is_missing bq foo/bq foo/whatever
+		test_path_is_missing bq &&
+		test_path_is_missing foo/bq &&
+		test_path_is_missing foo/whatever
 	)
 '
 
@@ -617,7 +624,9 @@ test_expect_success '3b-R: bq_1->foo/bq_2 on A, foo/->bar/ on B' '
 		test_cmp expect actual &&
 
 		test_must_fail git rev-parse HEAD:bq HEAD:foo/bq &&
-		test_path_is_missing bq foo/bq foo/whatever
+		test_path_is_missing bq &&
+		test_path_is_missing foo/bq &&
+		test_path_is_missing foo/whatever
 	)
 '
 
@@ -666,7 +675,7 @@ test_setup_4a () {
 #   correct requires doing the merge in-memory first, then realizing that no
 #   updates to the file are necessary, and thus that we can just leave the path
 #   alone.
-test_expect_failure '4a: Change on A, change on B subset of A, dirty mods present' '
+test_expect_merge_algorithm failure success '4a: Change on A, change on B subset of A, dirty mods present' '
 	test_setup_4a &&
 	(
 		cd 4a &&

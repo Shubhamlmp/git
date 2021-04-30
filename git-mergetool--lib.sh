@@ -46,9 +46,11 @@ show_tool_names () {
 		while read scriptname
 		do
 			setup_tool "$scriptname" 2>/dev/null
-			variants="$variants$(list_tool_variants)\n"
+			# We need an actual line feed here
+			variants="$variants
+$(list_tool_variants)"
 		done
-		variants="$(echo "$variants" | sort | uniq)"
+		variants="$(echo "$variants" | sort -u)"
 
 		for toolname in $variants
 		do
@@ -138,6 +140,10 @@ setup_user_tool () {
 	merge_cmd () {
 		( eval $merge_tool_cmd )
 	}
+
+	list_tool_variants () {
+		echo "$tool"
+	}
 }
 
 setup_tool () {
@@ -158,6 +164,10 @@ setup_tool () {
 
 	merge_cmd () {
 		return 1
+	}
+
+	hide_resolved_enabled () {
+		return 0
 	}
 
 	translate_merge_tool_path () {
@@ -244,6 +254,10 @@ trust_exit_code () {
 	fi
 }
 
+initialize_merge_tool () {
+	# Bring tool-specific functions into scope
+	setup_tool "$1" || return 1
+}
 
 # Entry point for running tools
 run_merge_tool () {
@@ -254,9 +268,6 @@ run_merge_tool () {
 
 	merge_tool_path=$(get_merge_tool_path "$1") || exit
 	base_present="$2"
-
-	# Bring tool-specific functions into scope
-	setup_tool "$1" || return 1
 
 	if merge_mode
 	then

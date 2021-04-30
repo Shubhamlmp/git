@@ -73,6 +73,7 @@ struct object_array {
  * sha1-name.c:                                              20
  * list-objects-filter.c:                                      21
  * builtin/fsck.c:           0--3
+ * builtin/gc.c:             0
  * builtin/index-pack.c:                                     2021
  * builtin/pack-objects.c:                                   20
  * builtin/reflog.c:                   10--12
@@ -144,7 +145,7 @@ struct object *parse_object_or_die(const struct object_id *oid, const char *name
 struct object *parse_object_buffer(struct repository *r, const struct object_id *oid, enum object_type type, unsigned long size, void *buffer, int *eaten_p);
 
 /** Returns the object, with potentially excess memory allocated. **/
-struct object *lookup_unknown_object(const struct object_id *oid);
+struct object *lookup_unknown_object(struct repository *r, const struct object_id *oid);
 
 struct object_list *object_list_insert(struct object *item,
 				       struct object_list **list_p);
@@ -190,8 +191,9 @@ void object_array_clear(struct object_array *array);
 void clear_object_flags(unsigned flags);
 
 /*
- * Clear the specified object flags from all in-core commit objects.
+ * Clear the specified object flags from all in-core commit objects from
+ * the specified repository.
  */
-void clear_commit_marks_all(unsigned int flags);
+void repo_clear_commit_marks(struct repository *r, unsigned int flags);
 
 #endif /* OBJECT_H */

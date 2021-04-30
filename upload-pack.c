@@ -110,6 +110,7 @@ struct upload_pack_data {
 	unsigned done : 1;					/* v2 only */
 	unsigned allow_ref_in_want : 1;				/* v2 only */
 	unsigned allow_sideband_all : 1;			/* v2 only */
+	unsigned advertise_sid : 1;
 };
 
 static void upload_pack_data_init(struct upload_pack_data *data)
@@ -141,6 +142,7 @@ static void upload_pack_data_init(struct upload_pack_data *data)
 	packet_writer_init(&data->writer, 1);
 
 	data->keepalive = 5;
+	data->advertise_sid = 0;
 }
 
 static void upload_pack_data_clear(struct upload_pack_data *data)
@@ -154,7 +156,7 @@ static void upload_pack_data_clear(struct upload_pack_data *data)
 	string_list_clear(&data->deepen_not, 0);
 	object_array_clear(&data->extra_edge_obj);
 	list_objects_filter_release(&data->filter_options);
-	string_list_clear(&data->allowed_filters, 1);
+	string_list_clear(&data->allowed_filters, 0);
 
 	free((char *)data->pack_objects_hook);
 }
@@ -303,14 +305,7 @@ static void create_pack_file(struct upload_pack_data *pack_data,
 	if (pack_data->filter_options.choice) {
 		const char *spec =
 			expand_list_objects_filter_spec(&pack_data->filter_options);
-		if (pack_objects.use_shell) {
-			struct strbuf buf = STRBUF_INIT;
-			sq_quote_buf(&buf, spec);
-			strvec_pushf(&pack_objects.args, "--filter=%s", buf.buf);
-			strbuf_release(&buf);
-		} else {
-			strvec_pushf(&pack_objects.args, "--filter=%s", spec);
-		}
+		strvec_pushf(&pack_objects.args, "--filter=%s", spec);
 	}
 	if (uri_protocols) {
 		for (i = 0; i < uri_protocols->nr; i++)
@@ -321,6 +316,7 @@ static void create_pack_file(struct upload_pack_data *pack_data,
 	pack_objects.in = -1;
 	pack_objects.out = -1;
 	pack_objects.err = -1;
+	pack_objects.clean_on_exit = 1;
 
 	if (start_command(&pack_objects))
 		die("git upload-pack: unable to fork git-pack-objects");
@@ -497,7 +493,7 @@ static int got_oid(struct upload_pack_data *data,
 
 static int ok_to_give_up(struct upload_pack_data *data)
 {
-	uint32_t min_generation = GENERATION_NUMBER_ZERO;
+	timestamp_t min_generation = GENERATION_NUMBER_ZERO;
 
 	if (!data->have_obj.nr)
 		return 0;
@@ -1056,6 +1052,7 @@ static void receive_needs(struct upload_pack_data *data,
 		const char *features;
 		struct object_id oid_buf;
 		const char *arg;
+		int feature_len;
 
 		reset_timeout(data->timeout);
 		if (packet_reader_read(reader) != PACKET_READ_NORMAL)
@@ -1108,6 +1105,13 @@ static void receive_needs(struct upload_pack_data *data,
 		    parse_feature_request(features, "filter"))
 			data->filter_capability_requested = 1;
 
+		arg = parse_feature_value(features, "session-id", &feature_len, NULL);
+		if (arg) {
+			char *client_sid = xstrndup(arg, feature_len);
+			trace2_data_string("transfer", NULL, "client-sid", client_sid);
+			free(client_sid);
+		}
+
 		o = parse_object(the_repository, &oid_buf);
 		if (!o) {
 			packet_writer_error(&data->writer,
@@ -1149,7 +1153,7 @@ static void receive_needs(struct upload_pack_data *data,
 static int mark_our_ref(const char *refname, const char *refname_full,
 			const struct object_id *oid)
 {
-	struct object *o = lookup_unknown_object(oid);
+	struct object *o = lookup_unknown_object(the_repository, oid);
 
 	if (ref_is_hidden(refname, refname_full)) {
 		o->flags |= HIDDEN_REF;
@@ -1178,6 +1182,11 @@ static void format_symref_info(struct strbuf *buf, struct string_list *symref)
 		strbuf_addf(buf, " symref=%s:%s", item->string, (char *)item->util);
 }
 
+static void format_session_id(struct strbuf *buf, struct upload_pack_data *d) {
+	if (d->advertise_sid)
+		strbuf_addf(buf, " session-id=%s", trace2_session_id());
+}
+
 static int send_ref(const char *refname, const struct object_id *oid,
 		    int flag, void *cb_data)
 {
@@ -1193,9 +1202,11 @@ static int send_ref(const char *refname, const struct object_id *oid,
 
 	if (capabilities) {
 		struct strbuf symref_info = STRBUF_INIT;
+		struct strbuf session_id = STRBUF_INIT;
 
 		format_symref_info(&symref_info, &data->symref);
-		packet_write_fmt(1, "%s %s%c%s%s%s%s%s%s object-format=%s agent=%s\n",
+		format_session_id(&session_id, data);
+		packet_write_fmt(1, "%s %s%c%s%s%s%s%s%s%s object-format=%s agent=%s\n",
 			     oid_to_hex(oid), refname_nons,
 			     0, capabilities,
 			     (data->allow_uor & ALLOW_TIP_SHA1) ?
@@ -1205,14 +1216,16 @@ static int send_ref(const char *refname, const struct object_id *oid,
 			     data->stateless_rpc ? " no-done" : "",
 			     symref_info.buf,
 			     data->allow_filter ? " filter" : "",
+			     session_id.buf,
 			     the_hash_algo->name,
 			     git_user_agent_sanitized());
 		strbuf_release(&symref_info);
+		strbuf_release(&session_id);
 	} else {
 		packet_write_fmt(1, "%s %s\n", oid_to_hex(oid), refname_nons);
 	}
 	capabilities = NULL;
-	if (!peel_ref(refname, &peeled))
+	if (!peel_iterated_oid(oid, &peeled))
 		packet_write_fmt(1, "%s %s^{}\n", oid_to_hex(&peeled), refname_nons);
 	return 0;
 }
@@ -1299,15 +1312,18 @@ static int upload_pack_config(const char *var, const char *value, void *cb_data)
 		data->allow_sideband_all = git_config_bool(var, value);
 	} else if (!strcmp("core.precomposeunicode", var)) {
 		precomposed_unicode = git_config_bool(var, value);
+	} else if (!strcmp("transfer.advertisesid", var)) {
+		data->advertise_sid = git_config_bool(var, value);
 	}
 
 	if (current_config_scope() != CONFIG_SCOPE_LOCAL &&
-	current_config_scope() != CONFIG_SCOPE_WORKTREE) {
+	    current_config_scope() != CONFIG_SCOPE_WORKTREE) {
 		if (!strcmp("uploadpack.packobjectshook", var))
 			return git_config_string(&data->pack_objects_hook, var, value);
 	}
 
-	parse_object_filter_config(var, value, data);
+	if (parse_object_filter_config(var, value, data) < 0)
+		return -1;
 
 	return parse_hide_refs_config(var, value, "uploadpack");
 }
@@ -1344,7 +1360,18 @@ void upload_pack(struct upload_pack_options *options)
 				   PACKET_READ_DIE_ON_ERR_PACKET);
 
 		receive_needs(&data, &reader);
-		if (data.want_obj.nr) {
+
+		/*
+		 * An EOF at this exact point in negotiation should be
+		 * acceptable from stateless clients as they will consume the
+		 * shallow list before doing subsequent rpc with haves/etc.
+		 */
+		if (data.stateless_rpc)
+			reader.options |= PACKET_READ_GENTLE_ON_EOF;
+
+		if (data.want_obj.nr &&
+		    packet_reader_peek(&reader) != PACKET_READ_EOF) {
+			reader.options &= ~PACKET_READ_GENTLE_ON_EOF;
 			get_common_commits(&data, &reader);
 			create_pack_file(&data, NULL);
 		}

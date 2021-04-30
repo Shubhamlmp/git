@@ -337,7 +337,7 @@ static int filter_refs(const char *refname, const struct object_id *oid,
 
 enum peel_status peel_object(const struct object_id *name, struct object_id *oid)
 {
-	struct object *o = lookup_unknown_object(name);
+	struct object *o = lookup_unknown_object(the_repository, name);
 
 	if (o->type == OBJ_NONE) {
 		int type = oid_object_info(the_repository, name, NULL);
@@ -562,17 +562,36 @@ void expand_ref_prefix(struct strvec *prefixes, const char *prefix)
 		strvec_pushf(prefixes, *p, len, prefix);
 }
 
-char *repo_default_branch_name(struct repository *r)
+static const char default_branch_name_advice[] = N_(
+"Using '%s' as the name for the initial branch. This default branch name\n"
+"is subject to change. To configure the initial branch name to use in all\n"
+"of your new repositories, which will suppress this warning, call:\n"
+"\n"
+"\tgit config --global init.defaultBranch <name>\n"
+"\n"
+"Names commonly chosen instead of 'master' are 'main', 'trunk' and\n"
+"'development'. The just-created branch can be renamed via this command:\n"
+"\n"
+"\tgit branch -m <name>\n"
+);
+
+char *repo_default_branch_name(struct repository *r, int quiet)
 {
 	const char *config_key = "init.defaultbranch";
 	const char *config_display_key = "init.defaultBranch";
 	char *ret = NULL, *full_ref;
+	const char *env = getenv("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME");
 
-	if (repo_config_get_string(r, config_key, &ret) < 0)
+	if (env && *env)
+		ret = xstrdup(env);
+	else if (repo_config_get_string(r, config_key, &ret) < 0)
 		die(_("could not retrieve `%s`"), config_display_key);
 
-	if (!ret)
+	if (!ret) {
 		ret = xstrdup("master");
+		if (!quiet)
+			advise(_(default_branch_name_advice), ret);
+	}
 
 	full_ref = xstrfmt("refs/heads/%s", ret);
 	if (check_refname_format(full_ref, 0))
@@ -582,12 +601,12 @@ char *repo_default_branch_name(struct repository *r)
 	return ret;
 }
 
-const char *git_default_branch_name(void)
+const char *git_default_branch_name(int quiet)
 {
 	static char *ret;
 
 	if (!ret)
-		ret = repo_default_branch_name(the_repository);
+		ret = repo_default_branch_name(the_repository, quiet);
 
 	return ret;
 }
@@ -598,10 +617,14 @@ const char *git_default_branch_name(void)
  * to name a branch.
  */
 static char *substitute_branch_name(struct repository *r,
-				    const char **string, int *len)
+				    const char **string, int *len,
+				    int nonfatal_dangling_mark)
 {
 	struct strbuf buf = STRBUF_INIT;
-	int ret = repo_interpret_branch_name(r, *string, *len, &buf, 0);
+	struct interpret_branch_name_options options = {
+		.nonfatal_dangling_mark = nonfatal_dangling_mark
+	};
+	int ret = repo_interpret_branch_name(r, *string, *len, &buf, &options);
 
 	if (ret == *len) {
 		size_t size;
@@ -614,17 +637,13 @@ static char *substitute_branch_name(struct repository *r,
 }
 
 int repo_dwim_ref(struct repository *r, const char *str, int len,
-		  struct object_id *oid, char **ref)
+		  struct object_id *oid, char **ref, int nonfatal_dangling_mark)
 {
-	char *last_branch = substitute_branch_name(r, &str, &len);
+	char *last_branch = substitute_branch_name(r, &str, &len,
+						   nonfatal_dangling_mark);
 	int   refs_found  = expand_ref(r, str, len, oid, ref);
 	free(last_branch);
 	return refs_found;
-}
-
-int dwim_ref(const char *str, int len, struct object_id *oid, char **ref)
-{
-	return repo_dwim_ref(the_repository, str, len, oid, ref);
 }
 
 int expand_ref(struct repository *repo, const char *str, int len,
@@ -665,7 +684,7 @@ int repo_dwim_log(struct repository *r, const char *str, int len,
 		  struct object_id *oid, char **log)
 {
 	struct ref_store *refs = get_main_ref_store(r);
-	char *last_branch = substitute_branch_name(r, &str, &len);
+	char *last_branch = substitute_branch_name(r, &str, &len, 0);
 	const char **p;
 	int logs_found = 0;
 	struct strbuf path = STRBUF_INIT;
@@ -863,59 +882,9 @@ struct read_ref_at_cb {
 	int *cutoff_cnt;
 };
 
-static int read_ref_at_ent(struct object_id *ooid, struct object_id *noid,
-		const char *email, timestamp_t timestamp, int tz,
-		const char *message, void *cb_data)
+static void set_read_ref_cutoffs(struct read_ref_at_cb *cb,
+		timestamp_t timestamp, int tz, const char *message)
 {
-	struct read_ref_at_cb *cb = cb_data;
-
-	cb->reccnt++;
-	cb->tz = tz;
-	cb->date = timestamp;
-
-	if (timestamp <= cb->at_time || cb->cnt == 0) {
-		if (cb->msg)
-			*cb->msg = xstrdup(message);
-		if (cb->cutoff_time)
-			*cb->cutoff_time = timestamp;
-		if (cb->cutoff_tz)
-			*cb->cutoff_tz = tz;
-		if (cb->cutoff_cnt)
-			*cb->cutoff_cnt = cb->reccnt - 1;
-		/*
-		 * we have not yet updated cb->[n|o]oid so they still
-		 * hold the values for the previous record.
-		 */
-		if (!is_null_oid(&cb->ooid)) {
-			oidcpy(cb->oid, noid);
-			if (!oideq(&cb->ooid, noid))
-				warning(_("log for ref %s has gap after %s"),
-					cb->refname, show_date(cb->date, cb->tz, DATE_MODE(RFC2822)));
-		}
-		else if (cb->date == cb->at_time)
-			oidcpy(cb->oid, noid);
-		else if (!oideq(noid, cb->oid))
-			warning(_("log for ref %s unexpectedly ended on %s"),
-				cb->refname, show_date(cb->date, cb->tz,
-						       DATE_MODE(RFC2822)));
-		oidcpy(&cb->ooid, ooid);
-		oidcpy(&cb->noid, noid);
-		cb->found_it = 1;
-		return 1;
-	}
-	oidcpy(&cb->ooid, ooid);
-	oidcpy(&cb->noid, noid);
-	if (cb->cnt > 0)
-		cb->cnt--;
-	return 0;
-}
-
-static int read_ref_at_ent_oldest(struct object_id *ooid, struct object_id *noid,
-				  const char *email, timestamp_t timestamp,
-				  int tz, const char *message, void *cb_data)
-{
-	struct read_ref_at_cb *cb = cb_data;
-
 	if (cb->msg)
 		*cb->msg = xstrdup(message);
 	if (cb->cutoff_time)
@@ -924,6 +893,69 @@ static int read_ref_at_ent_oldest(struct object_id *ooid, struct object_id *noid
 		*cb->cutoff_tz = tz;
 	if (cb->cutoff_cnt)
 		*cb->cutoff_cnt = cb->reccnt;
+}
+
+static int read_ref_at_ent(struct object_id *ooid, struct object_id *noid,
+		const char *email, timestamp_t timestamp, int tz,
+		const char *message, void *cb_data)
+{
+	struct read_ref_at_cb *cb = cb_data;
+	int reached_count;
+
+	cb->tz = tz;
+	cb->date = timestamp;
+
+	/*
+	 * It is not possible for cb->cnt == 0 on the first iteration because
+	 * that special case is handled in read_ref_at().
+	 */
+	if (cb->cnt > 0)
+		cb->cnt--;
+	reached_count = cb->cnt == 0 && !is_null_oid(ooid);
+	if (timestamp <= cb->at_time || reached_count) {
+		set_read_ref_cutoffs(cb, timestamp, tz, message);
+		/*
+		 * we have not yet updated cb->[n|o]oid so they still
+		 * hold the values for the previous record.
+		 */
+		if (!is_null_oid(&cb->ooid) && !oideq(&cb->ooid, noid))
+			warning(_("log for ref %s has gap after %s"),
+					cb->refname, show_date(cb->date, cb->tz, DATE_MODE(RFC2822)));
+		if (reached_count)
+			oidcpy(cb->oid, ooid);
+		else if (!is_null_oid(&cb->ooid) || cb->date == cb->at_time)
+			oidcpy(cb->oid, noid);
+		else if (!oideq(noid, cb->oid))
+			warning(_("log for ref %s unexpectedly ended on %s"),
+				cb->refname, show_date(cb->date, cb->tz,
+						       DATE_MODE(RFC2822)));
+		cb->found_it = 1;
+	}
+	cb->reccnt++;
+	oidcpy(&cb->ooid, ooid);
+	oidcpy(&cb->noid, noid);
+	return cb->found_it;
+}
+
+static int read_ref_at_ent_newest(struct object_id *ooid, struct object_id *noid,
+				  const char *email, timestamp_t timestamp,
+				  int tz, const char *message, void *cb_data)
+{
+	struct read_ref_at_cb *cb = cb_data;
+
+	set_read_ref_cutoffs(cb, timestamp, tz, message);
+	oidcpy(cb->oid, noid);
+	/* We just want the first entry */
+	return 1;
+}
+
+static int read_ref_at_ent_oldest(struct object_id *ooid, struct object_id *noid,
+				  const char *email, timestamp_t timestamp,
+				  int tz, const char *message, void *cb_data)
+{
+	struct read_ref_at_cb *cb = cb_data;
+
+	set_read_ref_cutoffs(cb, timestamp, tz, message);
 	oidcpy(cb->oid, ooid);
 	if (is_null_oid(cb->oid))
 		oidcpy(cb->oid, noid);
@@ -948,6 +980,11 @@ int read_ref_at(struct ref_store *refs, const char *refname,
 	cb.cutoff_cnt = cutoff_cnt;
 	cb.oid = oid;
 
+	if (cb.cnt == 0) {
+		refs_for_each_reflog_ent_reverse(refs, refname, read_ref_at_ent_newest, &cb);
+		return 0;
+	}
+
 	refs_for_each_reflog_ent_reverse(refs, refname, read_ref_at_ent, &cb);
 
 	if (!cb.reccnt) {
@@ -970,7 +1007,7 @@ struct ref_transaction *ref_store_transaction_begin(struct ref_store *refs,
 	struct ref_transaction *tr;
 	assert(err);
 
-	tr = xcalloc(1, sizeof(struct ref_transaction));
+	CALLOC_ARRAY(tr, 1);
 	tr->ref_store = refs;
 	return tr;
 }
@@ -1269,7 +1306,7 @@ int parse_hide_refs_config(const char *var, const char *value, const char *secti
 		while (len && ref[len - 1] == '/')
 			ref[--len] = '\0';
 		if (!hide_refs) {
-			hide_refs = xcalloc(1, sizeof(*hide_refs));
+			CALLOC_ARRAY(hide_refs, 1);
 			hide_refs->strdup_strings = 1;
 		}
 		string_list_append(hide_refs, ref);
@@ -1527,6 +1564,93 @@ int for_each_rawref(each_ref_fn fn, void *cb_data)
 	return refs_for_each_rawref(get_main_ref_store(the_repository), fn, cb_data);
 }
 
+static int qsort_strcmp(const void *va, const void *vb)
+{
+	const char *a = *(const char **)va;
+	const char *b = *(const char **)vb;
+
+	return strcmp(a, b);
+}
+
+static void find_longest_prefixes_1(struct string_list *out,
+				  struct strbuf *prefix,
+				  const char **patterns, size_t nr)
+{
+	size_t i;
+
+	for (i = 0; i < nr; i++) {
+		char c = patterns[i][prefix->len];
+		if (!c || is_glob_special(c)) {
+			string_list_append(out, prefix->buf);
+			return;
+		}
+	}
+
+	i = 0;
+	while (i < nr) {
+		size_t end;
+
+		/*
+		* Set "end" to the index of the element _after_ the last one
+		* in our group.
+		*/
+		for (end = i + 1; end < nr; end++) {
+			if (patterns[i][prefix->len] != patterns[end][prefix->len])
+				break;
+		}
+
+		strbuf_addch(prefix, patterns[i][prefix->len]);
+		find_longest_prefixes_1(out, prefix, patterns + i, end - i);
+		strbuf_setlen(prefix, prefix->len - 1);
+
+		i = end;
+	}
+}
+
+static void find_longest_prefixes(struct string_list *out,
+				  const char **patterns)
+{
+	struct strvec sorted = STRVEC_INIT;
+	struct strbuf prefix = STRBUF_INIT;
+
+	strvec_pushv(&sorted, patterns);
+	QSORT(sorted.v, sorted.nr, qsort_strcmp);
+
+	find_longest_prefixes_1(out, &prefix, sorted.v, sorted.nr);
+
+	strvec_clear(&sorted);
+	strbuf_release(&prefix);
+}
+
+int for_each_fullref_in_prefixes(const char *namespace,
+				 const char **patterns,
+				 each_ref_fn fn, void *cb_data,
+				 unsigned int broken)
+{
+	struct string_list prefixes = STRING_LIST_INIT_DUP;
+	struct string_list_item *prefix;
+	struct strbuf buf = STRBUF_INIT;
+	int ret = 0, namespace_len;
+
+	find_longest_prefixes(&prefixes, patterns);
+
+	if (namespace)
+		strbuf_addstr(&buf, namespace);
+	namespace_len = buf.len;
+
+	for_each_string_list_item(prefix, &prefixes) {
+		strbuf_addstr(&buf, prefix->string);
+		ret = for_each_fullref_in(buf.buf, fn, cb_data, broken);
+		if (ret)
+			break;
+		strbuf_setlen(&buf, namespace_len);
+	}
+
+	string_list_clear(&prefixes, 0);
+	strbuf_release(&buf);
+	return ret;
+}
+
 static int refs_read_special_head(struct ref_store *ref_store,
 				  const char *refname, struct object_id *oid,
 				  struct strbuf *referent, unsigned int *type)
@@ -1774,6 +1898,7 @@ struct ref_store *get_main_ref_store(struct repository *r)
 		BUG("attempting to get main_ref_store outside of repository");
 
 	r->refs_private = ref_store_init(r->gitdir, REF_STORE_ALL_CAPS);
+	r->refs_private = maybe_debug_wrap_ref_store(r->gitdir, r->refs_private);
 	return r->refs_private;
 }
 
@@ -1878,31 +2003,14 @@ int refs_pack_refs(struct ref_store *refs, unsigned int flags)
 	return refs->be->pack_refs(refs, flags);
 }
 
-int refs_peel_ref(struct ref_store *refs, const char *refname,
-		  struct object_id *oid)
+int peel_iterated_oid(const struct object_id *base, struct object_id *peeled)
 {
-	int flag;
-	struct object_id base;
+	if (current_ref_iter &&
+	    (current_ref_iter->oid == base ||
+	     oideq(current_ref_iter->oid, base)))
+		return ref_iterator_peel(current_ref_iter, peeled);
 
-	if (current_ref_iter && current_ref_iter->refname == refname) {
-		struct object_id peeled;
-
-		if (ref_iterator_peel(current_ref_iter, &peeled))
-			return -1;
-		oidcpy(oid, &peeled);
-		return 0;
-	}
-
-	if (refs_read_ref_full(refs, refname,
-			       RESOLVE_REF_READING, &base, &flag))
-		return -1;
-
-	return peel_object(&base, oid);
-}
-
-int peel_ref(const char *refname, struct object_id *oid)
-{
-	return refs_peel_ref(get_main_ref_store(the_repository), refname, oid);
+	return peel_object(base, peeled);
 }
 
 int refs_create_symref(struct ref_store *refs,

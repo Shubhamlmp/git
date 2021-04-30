@@ -259,8 +259,6 @@ static void wt_longstatus_print_trailer(struct wt_status *s)
 	status_printf_ln(s, color(WT_STATUS_HEADER, s), "%s", "");
 }
 
-#define quote_path quote_path_relative
-
 static const char *wt_status_unmerged_status_string(int stagemask)
 {
 	switch (stagemask) {
@@ -338,7 +336,7 @@ static void wt_longstatus_print_unmerged_data(struct wt_status *s,
 		memset(padding, ' ', label_width);
 	}
 
-	one = quote_path(it->string, s->prefix, &onebuf);
+	one = quote_path(it->string, s->prefix, &onebuf, 0);
 	status_printf(s, color(WT_STATUS_HEADER, s), "\t");
 
 	how = wt_status_unmerged_status_string(d->stagemask);
@@ -404,8 +402,8 @@ static void wt_longstatus_print_change_data(struct wt_status *s,
 	if (d->rename_status == status)
 		one_name = d->rename_source;
 
-	one = quote_path(one_name, s->prefix, &onebuf);
-	two = quote_path(two_name, s->prefix, &twobuf);
+	one = quote_path(one_name, s->prefix, &onebuf, 0);
+	two = quote_path(two_name, s->prefix, &twobuf, 0);
 
 	status_printf(s, color(WT_STATUS_HEADER, s), "\t");
 	what = wt_status_diff_status_string(status);
@@ -458,7 +456,7 @@ static void wt_status_collect_changed_cb(struct diff_queue_struct *q,
 		it = string_list_insert(&s->change, p->two->path);
 		d = it->util;
 		if (!d) {
-			d = xcalloc(1, sizeof(*d));
+			CALLOC_ARRAY(d, 1);
 			it->util = d;
 		}
 		if (!d->worktree_status)
@@ -542,7 +540,7 @@ static void wt_status_collect_updated_cb(struct diff_queue_struct *q,
 		it = string_list_insert(&s->change, p->two->path);
 		d = it->util;
 		if (!d) {
-			d = xcalloc(1, sizeof(*d));
+			CALLOC_ARRAY(d, 1);
 			it->util = d;
 		}
 		if (!d->index_status)
@@ -608,7 +606,9 @@ static void wt_status_collect_changes_worktree(struct wt_status *s)
 	if (s->ignore_submodule_arg) {
 		rev.diffopt.flags.override_submodule_config = 1;
 		handle_ignore_submodules_arg(&rev.diffopt, s->ignore_submodule_arg);
-	}
+	} else if (!rev.diffopt.flags.ignore_submodule_set &&
+			s->show_untracked_files != SHOW_NO_UNTRACKED_FILES)
+		handle_ignore_submodules_arg(&rev.diffopt, "none");
 	rev.diffopt.format_callback = wt_status_collect_changed_cb;
 	rev.diffopt.format_callback_data = s;
 	rev.diffopt.detect_rename = s->detect_rename >= 0 ? s->detect_rename : rev.diffopt.detect_rename;
@@ -671,7 +671,7 @@ static void wt_status_collect_changes_initial(struct wt_status *s)
 		it = string_list_insert(&s->change, ce->name);
 		d = it->util;
 		if (!d) {
-			d = xcalloc(1, sizeof(*d));
+			CALLOC_ARRAY(d, 1);
 			it->util = d;
 		}
 		if (ce_stage(ce)) {
@@ -778,9 +778,14 @@ void wt_status_collect(struct wt_status *s)
 
 void wt_status_collect_free_buffers(struct wt_status *s)
 {
-	free(s->state.branch);
-	free(s->state.onto);
-	free(s->state.detached_from);
+	wt_status_state_free_buffers(&s->state);
+}
+
+void wt_status_state_free_buffers(struct wt_status_state *state)
+{
+	FREE_AND_NULL(state->branch);
+	FREE_AND_NULL(state->onto);
+	FREE_AND_NULL(state->detached_from);
 }
 
 static void wt_longstatus_print_unmerged(struct wt_status *s)
@@ -966,7 +971,7 @@ static void wt_longstatus_print_other(struct wt_status *s,
 		struct string_list_item *it;
 		const char *path;
 		it = &(l->items[i]);
-		path = quote_path(it->string, s->prefix, &buf);
+		path = quote_path(it->string, s->prefix, &buf, 0);
 		if (column_active(s->colopts)) {
 			string_list_append(&output, path);
 			continue;
@@ -1227,7 +1232,7 @@ static int split_commit_in_progress(struct wt_status *s)
  * The function assumes that the line does not contain useless spaces
  * before or after the command.
  */
-static void abbrev_sha1_in_line(struct strbuf *line)
+static void abbrev_oid_in_line(struct strbuf *line)
 {
 	struct strbuf **split;
 	int i;
@@ -1277,7 +1282,7 @@ static int read_rebase_todolist(const char *fname, struct string_list *lines)
 		strbuf_trim(&line);
 		if (!line.len)
 			continue;
-		abbrev_sha1_in_line(&line);
+		abbrev_oid_in_line(&line);
 		string_list_append(lines, line.buf);
 	}
 	fclose(f);
@@ -1569,10 +1574,10 @@ static void wt_status_get_detached_from(struct repository *r,
 		return;
 	}
 
-	if (dwim_ref(cb.buf.buf, cb.buf.len, &oid, &ref) == 1 &&
-	    /* sha1 is a commit? match without further lookup */
+	if (dwim_ref(cb.buf.buf, cb.buf.len, &oid, &ref, 1) == 1 &&
+	    /* oid is a commit? match without further lookup */
 	    (oideq(&cb.noid, &oid) ||
-	     /* perhaps sha1 is a tag, try to dereference to a commit */
+	     /* perhaps oid is a tag, try to dereference to a commit */
 	     ((commit = lookup_commit_reference_gently(r, &oid, 1)) != NULL &&
 	      oideq(&cb.noid, &commit->object.oid)))) {
 		const char *from = ref;
@@ -1739,9 +1744,9 @@ static void wt_longstatus_print(struct wt_status *s)
 			} else if (s->state.detached_from) {
 				branch_name = s->state.detached_from;
 				if (s->state.detached_at)
-					on_what = HEAD_DETACHED_AT;
+					on_what = _("HEAD detached at ");
 				else
-					on_what = HEAD_DETACHED_FROM;
+					on_what = _("HEAD detached from ");
 			} else {
 				branch_name = "";
 				on_what = _("Not currently on any branch.");
@@ -1801,29 +1806,36 @@ static void wt_longstatus_print(struct wt_status *s)
 			; /* nothing */
 		else if (s->workdir_dirty) {
 			if (s->hints)
-				printf(_("no changes added to commit "
-					 "(use \"git add\" and/or \"git commit -a\")\n"));
+				fprintf(s->fp, _("no changes added to commit "
+						 "(use \"git add\" and/or "
+						 "\"git commit -a\")\n"));
 			else
-				printf(_("no changes added to commit\n"));
+				fprintf(s->fp, _("no changes added to "
+						 "commit\n"));
 		} else if (s->untracked.nr) {
 			if (s->hints)
-				printf(_("nothing added to commit but untracked files "
-					 "present (use \"git add\" to track)\n"));
+				fprintf(s->fp, _("nothing added to commit but "
+						 "untracked files present (use "
+						 "\"git add\" to track)\n"));
 			else
-				printf(_("nothing added to commit but untracked files present\n"));
+				fprintf(s->fp, _("nothing added to commit but "
+						 "untracked files present\n"));
 		} else if (s->is_initial) {
 			if (s->hints)
-				printf(_("nothing to commit (create/copy files "
-					 "and use \"git add\" to track)\n"));
+				fprintf(s->fp, _("nothing to commit (create/"
+						 "copy files and use \"git "
+						 "add\" to track)\n"));
 			else
-				printf(_("nothing to commit\n"));
+				fprintf(s->fp, _("nothing to commit\n"));
 		} else if (!s->show_untracked_files) {
 			if (s->hints)
-				printf(_("nothing to commit (use -u to show untracked files)\n"));
+				fprintf(s->fp, _("nothing to commit (use -u to "
+						 "show untracked files)\n"));
 			else
-				printf(_("nothing to commit\n"));
+				fprintf(s->fp, _("nothing to commit\n"));
 		} else
-			printf(_("nothing to commit, working tree clean\n"));
+			fprintf(s->fp, _("nothing to commit, working tree "
+					 "clean\n"));
 	}
 	if(s->show_stash)
 		wt_longstatus_print_stash_summary(s);
@@ -1846,12 +1858,12 @@ static void wt_shortstatus_unmerged(struct string_list_item *it,
 	}
 	color_fprintf(s->fp, color(WT_STATUS_UNMERGED, s), "%s", how);
 	if (s->null_termination) {
-		fprintf(stdout, " %s%c", it->string, 0);
+		fprintf(s->fp, " %s%c", it->string, 0);
 	} else {
 		struct strbuf onebuf = STRBUF_INIT;
 		const char *one;
-		one = quote_path(it->string, s->prefix, &onebuf);
-		printf(" %s\n", one);
+		one = quote_path(it->string, s->prefix, &onebuf, QUOTE_PATH_QUOTE_SP);
+		fprintf(s->fp, " %s\n", one);
 		strbuf_release(&onebuf);
 	}
 }
@@ -1864,37 +1876,28 @@ static void wt_shortstatus_status(struct string_list_item *it,
 	if (d->index_status)
 		color_fprintf(s->fp, color(WT_STATUS_UPDATED, s), "%c", d->index_status);
 	else
-		putchar(' ');
+		fputc(' ', s->fp);
 	if (d->worktree_status)
 		color_fprintf(s->fp, color(WT_STATUS_CHANGED, s), "%c", d->worktree_status);
 	else
-		putchar(' ');
-	putchar(' ');
+		fputc(' ', s->fp);
+	fputc(' ', s->fp);
 	if (s->null_termination) {
-		fprintf(stdout, "%s%c", it->string, 0);
+		fprintf(s->fp, "%s%c", it->string, 0);
 		if (d->rename_source)
-			fprintf(stdout, "%s%c", d->rename_source, 0);
+			fprintf(s->fp, "%s%c", d->rename_source, 0);
 	} else {
 		struct strbuf onebuf = STRBUF_INIT;
 		const char *one;
 
 		if (d->rename_source) {
-			one = quote_path(d->rename_source, s->prefix, &onebuf);
-			if (*one != '"' && strchr(one, ' ') != NULL) {
-				putchar('"');
-				strbuf_addch(&onebuf, '"');
-				one = onebuf.buf;
-			}
-			printf("%s -> ", one);
+			one = quote_path(d->rename_source, s->prefix, &onebuf,
+					 QUOTE_PATH_QUOTE_SP);
+			fprintf(s->fp, "%s -> ", one);
 			strbuf_release(&onebuf);
 		}
-		one = quote_path(it->string, s->prefix, &onebuf);
-		if (*one != '"' && strchr(one, ' ') != NULL) {
-			putchar('"');
-			strbuf_addch(&onebuf, '"');
-			one = onebuf.buf;
-		}
-		printf("%s\n", one);
+		one = quote_path(it->string, s->prefix, &onebuf, QUOTE_PATH_QUOTE_SP);
+		fprintf(s->fp, "%s\n", one);
 		strbuf_release(&onebuf);
 	}
 }
@@ -1903,13 +1906,13 @@ static void wt_shortstatus_other(struct string_list_item *it,
 				 struct wt_status *s, const char *sign)
 {
 	if (s->null_termination) {
-		fprintf(stdout, "%s %s%c", sign, it->string, 0);
+		fprintf(s->fp, "%s %s%c", sign, it->string, 0);
 	} else {
 		struct strbuf onebuf = STRBUF_INIT;
 		const char *one;
-		one = quote_path(it->string, s->prefix, &onebuf);
+		one = quote_path(it->string, s->prefix, &onebuf, QUOTE_PATH_QUOTE_SP);
 		color_fprintf(s->fp, color(WT_STATUS_UNTRACKED, s), "%s", sign);
-		printf(" %s\n", one);
+		fprintf(s->fp, " %s\n", one);
 		strbuf_release(&onebuf);
 	}
 }
@@ -2224,9 +2227,9 @@ static void wt_porcelain_v2_print_changed_entry(
 		 */
 		sep_char = '\t';
 		eol_char = '\n';
-		path = quote_path(it->string, s->prefix, &buf);
+		path = quote_path(it->string, s->prefix, &buf, 0);
 		if (d->rename_source)
-			path_from = quote_path(d->rename_source, s->prefix, &buf_from);
+			path_from = quote_path(d->rename_source, s->prefix, &buf_from, 0);
 	}
 
 	if (path_from)
@@ -2312,7 +2315,7 @@ static void wt_porcelain_v2_print_unmerged_entry(
 	if (s->null_termination)
 		path_index = it->string;
 	else
-		path_index = quote_path(it->string, s->prefix, &buf_index);
+		path_index = quote_path(it->string, s->prefix, &buf_index, 0);
 
 	fprintf(s->fp, "%c %s %s %06o %06o %06o %06o %s %s %s %s%c",
 			unmerged_prefix, key, submodule_token,
@@ -2345,7 +2348,7 @@ static void wt_porcelain_v2_print_other(
 		path = it->string;
 		eol_char = '\0';
 	} else {
-		path = quote_path(it->string, s->prefix, &buf);
+		path = quote_path(it->string, s->prefix, &buf, 0);
 		eol_char = '\n';
 	}
 

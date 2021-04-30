@@ -9,6 +9,7 @@
 #include "builtin.h"
 #include "exec-cmd.h"
 #include "parse-options.h"
+#include "worktree.h"
 
 #ifndef DEFAULT_GIT_TEMPLATE_DIR
 #define DEFAULT_GIT_TEMPLATE_DIR "/usr/share/git-core/templates"
@@ -24,7 +25,6 @@
 
 static int init_is_bare_repository = 0;
 static int init_shared_repository = -1;
-static const char *init_db_template_dir;
 
 static void copy_templates_1(struct strbuf *path, struct strbuf *template_path,
 			     DIR *dir)
@@ -93,7 +93,7 @@ static void copy_templates_1(struct strbuf *path, struct strbuf *template_path,
 	}
 }
 
-static void copy_templates(const char *template_dir)
+static void copy_templates(const char *template_dir, const char *init_template_dir)
 {
 	struct strbuf path = STRBUF_INIT;
 	struct strbuf template_path = STRBUF_INIT;
@@ -106,7 +106,7 @@ static void copy_templates(const char *template_dir)
 	if (!template_dir)
 		template_dir = getenv(TEMPLATE_DIR_ENVIRONMENT);
 	if (!template_dir)
-		template_dir = init_db_template_dir;
+		template_dir = init_template_dir;
 	if (!template_dir)
 		template_dir = to_free = system_path(DEFAULT_GIT_TEMPLATE_DIR);
 	if (!template_dir[0]) {
@@ -153,17 +153,6 @@ free_return:
 	clear_repository_format(&template_format);
 }
 
-static int git_init_db_config(const char *k, const char *v, void *cb)
-{
-	if (!strcmp(k, "init.templatedir"))
-		return git_config_pathname(&init_db_template_dir, k, v);
-
-	if (starts_with(k, "core."))
-		return platform_core_config(k, v, cb);
-
-	return 0;
-}
-
 /*
  * If the git_dir is not directly inside the working tree, then git will not
  * find it by default, and we need to set the worktree explicitly.
@@ -178,7 +167,7 @@ static int needs_work_tree_config(const char *git_dir, const char *work_tree)
 	return 1;
 }
 
-void initialize_repository_version(int hash_algo)
+void initialize_repository_version(int hash_algo, int reinit)
 {
 	char repo_version_string[10];
 	int repo_version = GIT_REPO_VERSION;
@@ -194,12 +183,15 @@ void initialize_repository_version(int hash_algo)
 	if (hash_algo != GIT_HASH_SHA1)
 		git_config_set("extensions.objectformat",
 			       hash_algos[hash_algo].name);
+	else if (reinit)
+		git_config_set_gently("extensions.objectformat", NULL);
 }
 
 static int create_default_files(const char *template_path,
 				const char *original_git_dir,
 				const char *initial_branch,
-				const struct repository_format *fmt)
+				const struct repository_format *fmt,
+				int quiet)
 {
 	struct stat st1;
 	struct strbuf buf = STRBUF_INIT;
@@ -208,10 +200,8 @@ static int create_default_files(const char *template_path,
 	int reinit;
 	int filemode;
 	struct strbuf err = STRBUF_INIT;
-
-	/* Just look for `init.templatedir` */
-	init_db_template_dir = NULL; /* re-set in case it was set before */
-	git_config(git_init_db_config, NULL);
+	const char *init_template_dir = NULL;
+	const char *work_tree = get_git_work_tree();
 
 	/*
 	 * First copy the templates -- we might have the default
@@ -222,7 +212,8 @@ static int create_default_files(const char *template_path,
 	 * values (since we've just potentially changed what's available on
 	 * disk).
 	 */
-	copy_templates(template_path);
+	git_config_get_value("init.templatedir", &init_template_dir);
+	copy_templates(template_path, init_template_dir);
 	git_config_clear();
 	reset_shared_repository();
 	git_config(git_default_config, NULL);
@@ -231,7 +222,7 @@ static int create_default_files(const char *template_path,
 	 * We must make sure command-line options continue to override any
 	 * values we might have just re-read from the config.
 	 */
-	is_bare_repository_cfg = init_is_bare_repository;
+	is_bare_repository_cfg = init_is_bare_repository || !work_tree;
 	if (init_shared_repository != -1)
 		set_shared_repository(init_shared_repository);
 
@@ -264,7 +255,7 @@ static int create_default_files(const char *template_path,
 		char *ref;
 
 		if (!initial_branch)
-			initial_branch = git_default_branch_name();
+			initial_branch = git_default_branch_name(quiet);
 
 		ref = xstrfmt("refs/heads/%s", initial_branch);
 		if (check_refname_format(ref, 0) < 0)
@@ -276,7 +267,7 @@ static int create_default_files(const char *template_path,
 		free(ref);
 	}
 
-	initialize_repository_version(fmt->hash_algo);
+	initialize_repository_version(fmt->hash_algo, 0);
 
 	/* Check filemode trustability */
 	path = git_path_buf(&buf, "config");
@@ -295,7 +286,6 @@ static int create_default_files(const char *template_path,
 	if (is_bare_repository())
 		git_config_set("core.bare", "true");
 	else {
-		const char *work_tree = get_git_work_tree();
 		git_config_set("core.bare", "false");
 		/* allow template config file to override the default */
 		if (log_all_ref_updates == LOG_REFS_UNSET)
@@ -364,6 +354,7 @@ static void separate_git_dir(const char *git_dir, const char *git_link)
 
 		if (rename(src, git_dir))
 			die_errno(_("unable to move %s to %s"), src, git_dir);
+		repair_worktrees(NULL, NULL);
 	}
 
 	write_file(git_link, "gitdir: %s", git_dir);
@@ -417,8 +408,8 @@ int init_db(const char *git_dir, const char *real_git_dir,
 	}
 	startup_info->have_repository = 1;
 
-	/* Just look for `core.hidedotfiles` */
-	git_config(git_init_db_config, NULL);
+	/* Ensure `core.hidedotfiles` is processed */
+	git_config(platform_core_config, NULL);
 
 	safe_create_dir(git_dir, 0);
 
@@ -434,7 +425,8 @@ int init_db(const char *git_dir, const char *real_git_dir,
 	validate_hash_algorithm(&repo_fmt, hash);
 
 	reinit = create_default_files(template_dir, original_git_dir,
-				      initial_branch, &repo_fmt);
+				      initial_branch, &repo_fmt,
+				      flags & INIT_DB_QUIET);
 	if (reinit && initial_branch)
 		warning(_("re-init: ignored --initial-branch=%s"),
 			initial_branch);
@@ -569,8 +561,10 @@ int cmd_init_db(int argc, const char **argv, const char *prefix)
 	if (real_git_dir && !is_absolute_path(real_git_dir))
 		real_git_dir = real_pathdup(real_git_dir, 1);
 
-	if (template_dir && *template_dir && !is_absolute_path(template_dir))
+	if (template_dir && *template_dir && !is_absolute_path(template_dir)) {
 		template_dir = absolute_pathdup(template_dir);
+		UNLEAK(template_dir);
+	}
 
 	if (argc == 1) {
 		int mkdir_tried = 0;
@@ -639,6 +633,30 @@ int cmd_init_db(int argc, const char **argv, const char *prefix)
 	 */
 	if (!git_dir)
 		git_dir = DEFAULT_GIT_DIR_ENVIRONMENT;
+
+	/*
+	 * When --separate-git-dir is used inside a linked worktree, take
+	 * care to ensure that the common .git/ directory is relocated, not
+	 * the worktree-specific .git/worktrees/<id>/ directory.
+	 */
+	if (real_git_dir) {
+		int err;
+		const char *p;
+		struct strbuf sb = STRBUF_INIT;
+
+		p = read_gitfile_gently(git_dir, &err);
+		if (p && get_common_dir(&sb, p)) {
+			struct strbuf mainwt = STRBUF_INIT;
+
+			strbuf_addbuf(&mainwt, &sb);
+			strbuf_strip_suffix(&mainwt, "/.git");
+			if (chdir(mainwt.buf) < 0)
+				die_errno(_("cannot chdir to %s"), mainwt.buf);
+			strbuf_release(&mainwt);
+			git_dir = strbuf_detach(&sb, NULL);
+		}
+		strbuf_release(&sb);
+	}
 
 	if (is_bare_repository_cfg < 0)
 		is_bare_repository_cfg = guess_repository_type(git_dir);

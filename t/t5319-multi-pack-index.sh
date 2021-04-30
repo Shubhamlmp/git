@@ -3,6 +3,7 @@
 test_description='multi-pack-indexes'
 . ./test-lib.sh
 
+GIT_TEST_MULTI_PACK_INDEX=0
 objdir=.git/objects
 
 HASH_LEN=$(test_oid rawsz)
@@ -137,7 +138,7 @@ test_expect_success 'write midx with one v2 pack' '
 
 compare_results_with_midx "one v2 pack"
 
-test_expect_success 'corrupt idx not opened' '
+test_expect_success 'corrupt idx reports errors' '
 	idx=$(test-tool read-midx $objdir | grep "\.idx\$") &&
 	mv $objdir/pack/$idx backup-$idx &&
 	test_when_finished "mv backup-\$idx \$objdir/pack/\$idx" &&
@@ -148,7 +149,7 @@ test_expect_success 'corrupt idx not opened' '
 	test_copy_bytes 1064 <backup-$idx >$objdir/pack/$idx &&
 
 	git -c core.multiPackIndex=true rev-list --objects --all 2>err &&
-	test_must_be_empty err
+	grep "index unavailable" err
 '
 
 test_expect_success 'add more objects' '
@@ -173,12 +174,12 @@ test_expect_success 'write progress off for redirected stderr' '
 '
 
 test_expect_success 'write force progress on for stderr' '
-	git multi-pack-index --object-dir=$objdir --progress write 2>err &&
+	GIT_PROGRESS_DELAY=0 git multi-pack-index --object-dir=$objdir --progress write 2>err &&
 	test_file_not_empty err
 '
 
 test_expect_success 'write with the --no-progress option' '
-	git multi-pack-index --object-dir=$objdir --no-progress write 2>err &&
+	GIT_PROGRESS_DELAY=0 git multi-pack-index --object-dir=$objdir --no-progress write 2>err &&
 	test_line_count = 0 err
 '
 
@@ -233,6 +234,48 @@ test_expect_success 'warn on improper hash version' '
 	)
 '
 
+test_expect_success 'midx picks objects from preferred pack' '
+	test_when_finished rm -rf preferred.git &&
+	git init --bare preferred.git &&
+	(
+		cd preferred.git &&
+
+		a=$(echo "a" | git hash-object -w --stdin) &&
+		b=$(echo "b" | git hash-object -w --stdin) &&
+		c=$(echo "c" | git hash-object -w --stdin) &&
+
+		# Set up two packs, duplicating the object "B" at different
+		# offsets.
+		#
+		# Note that the "BC" pack (the one we choose as preferred) sorts
+		# lexically after the "AB" pack, meaning that omitting the
+		# --preferred-pack argument would cause this test to fail (since
+		# the MIDX code would select the copy of "b" in the "AB" pack).
+		git pack-objects objects/pack/test-AB <<-EOF &&
+		$a
+		$b
+		EOF
+		bc=$(git pack-objects objects/pack/test-BC <<-EOF
+		$b
+		$c
+		EOF
+		) &&
+
+		git multi-pack-index --object-dir=objects \
+			write --preferred-pack=test-BC-$bc.idx 2>err &&
+		test_must_be_empty err &&
+
+		test-tool read-midx --show-objects objects >out &&
+
+		ofs=$(git show-index <objects/pack/test-BC-$bc.idx | grep $b |
+			cut -d" " -f1) &&
+		printf "%s %s\tobjects/pack/test-BC-%s.pack\n" \
+			"$b" "$ofs" "$bc" >expect &&
+		grep ^$b out >actual &&
+
+		test_cmp expect actual
+	)
+'
 
 test_expect_success 'verify multi-pack-index success' '
 	git multi-pack-index verify --object-dir=$objdir
@@ -313,12 +356,12 @@ test_expect_success 'verify bad OID version' '
 
 test_expect_success 'verify truncated chunk count' '
 	corrupt_midx_and_verify $MIDX_BYTE_CHUNK_COUNT "\01" $objdir \
-		"missing required"
+		"final chunk has non-zero id"
 '
 
 test_expect_success 'verify extended chunk count' '
 	corrupt_midx_and_verify $MIDX_BYTE_CHUNK_COUNT "\07" $objdir \
-		"terminating multi-pack-index chunk id appears earlier than expected"
+		"terminating chunk id appears earlier than expected"
 '
 
 test_expect_success 'verify missing required chunk' '
@@ -328,7 +371,7 @@ test_expect_success 'verify missing required chunk' '
 
 test_expect_success 'verify invalid chunk offset' '
 	corrupt_midx_and_verify $MIDX_BYTE_CHUNK_OFFSET "\01" $objdir \
-		"invalid chunk offset (too large)"
+		"improper chunk offset(s)"
 '
 
 test_expect_success 'verify packnames out of order' '
@@ -368,24 +411,64 @@ test_expect_success 'git-fsck incorrect offset' '
 '
 
 test_expect_success 'repack progress off for redirected stderr' '
-	git multi-pack-index --object-dir=$objdir repack 2>err &&
+	GIT_PROGRESS_DELAY=0 git multi-pack-index --object-dir=$objdir repack 2>err &&
 	test_line_count = 0 err
 '
 
 test_expect_success 'repack force progress on for stderr' '
-	git multi-pack-index --object-dir=$objdir --progress repack 2>err &&
+	GIT_PROGRESS_DELAY=0 git multi-pack-index --object-dir=$objdir --progress repack 2>err &&
 	test_file_not_empty err
 '
 
 test_expect_success 'repack with the --no-progress option' '
-	git multi-pack-index --object-dir=$objdir --no-progress repack 2>err &&
+	GIT_PROGRESS_DELAY=0 git multi-pack-index --object-dir=$objdir --no-progress repack 2>err &&
 	test_line_count = 0 err
 '
 
-test_expect_success 'repack removes multi-pack-index' '
+test_expect_success 'repack removes multi-pack-index when deleting packs' '
 	test_path_is_file $objdir/pack/multi-pack-index &&
-	GIT_TEST_MULTI_PACK_INDEX=0 git repack -adf &&
+	# Set GIT_TEST_MULTI_PACK_INDEX to 0 to avoid writing a new
+	# multi-pack-index after repacking, but set "core.multiPackIndex" to
+	# true so that "git repack" can read the existing MIDX.
+	GIT_TEST_MULTI_PACK_INDEX=0 git -c core.multiPackIndex repack -adf &&
 	test_path_is_missing $objdir/pack/multi-pack-index
+'
+
+test_expect_success 'repack preserves multi-pack-index when creating packs' '
+	git init preserve &&
+	test_when_finished "rm -fr preserve" &&
+	(
+		cd preserve &&
+		packdir=.git/objects/pack &&
+		midx=$packdir/multi-pack-index &&
+
+		test_commit 1 &&
+		pack1=$(git pack-objects --all $packdir/pack) &&
+		touch $packdir/pack-$pack1.keep &&
+		test_commit 2 &&
+		pack2=$(git pack-objects --revs $packdir/pack) &&
+		touch $packdir/pack-$pack2.keep &&
+
+		git multi-pack-index write &&
+		cp $midx $midx.bak &&
+
+		cat >pack-input <<-EOF &&
+		HEAD
+		^HEAD~1
+		EOF
+		test_commit 3 &&
+		pack3=$(git pack-objects --revs $packdir/pack <pack-input) &&
+		test_commit 4 &&
+		pack4=$(git pack-objects --revs $packdir/pack <pack-input) &&
+
+		GIT_TEST_MULTI_PACK_INDEX=0 git -c core.multiPackIndex repack -ad &&
+		ls -la $packdir &&
+		test_path_is_file $packdir/pack-$pack1.pack &&
+		test_path_is_file $packdir/pack-$pack2.pack &&
+		test_path_is_missing $packdir/pack-$pack3.pack &&
+		test_path_is_missing $packdir/pack-$pack4.pack &&
+		test_cmp_bin $midx.bak $midx
+	)
 '
 
 compare_results_with_midx "after repack"
@@ -522,7 +605,7 @@ test_expect_success 'expire progress off for redirected stderr' '
 test_expect_success 'expire force progress on for stderr' '
 	(
 		cd dup &&
-		git multi-pack-index --progress expire 2>err &&
+		GIT_PROGRESS_DELAY=0 git multi-pack-index --progress expire 2>err &&
 		test_file_not_empty err
 	)
 '
@@ -530,7 +613,7 @@ test_expect_success 'expire force progress on for stderr' '
 test_expect_success 'expire with the --no-progress option' '
 	(
 		cd dup &&
-		git multi-pack-index --no-progress expire 2>err &&
+		GIT_PROGRESS_DELAY=0 git multi-pack-index --no-progress expire 2>err &&
 		test_line_count = 0 err
 	)
 '
@@ -669,8 +752,9 @@ test_expect_success 'expire respects .keep files' '
 		PACKA=$(ls .git/objects/pack/a-pack*\.pack | sed s/\.pack\$//) &&
 		touch $PACKA.keep &&
 		git multi-pack-index expire &&
-		ls -S .git/objects/pack/a-pack* | grep $PACKA >a-pack-files &&
-		test_line_count = 3 a-pack-files &&
+		test_path_is_file $PACKA.idx &&
+		test_path_is_file $PACKA.keep &&
+		test_path_is_file $PACKA.pack &&
 		test-tool read-midx .git/objects | grep idx >midx-list &&
 		test_line_count = 2 midx-list
 	)
@@ -711,6 +795,32 @@ test_expect_success 'repack --batch-size=<large> repacks everything' '
 		git multi-pack-index expire &&
 		ls -al .git/objects/pack/*idx >idx-list &&
 		test_line_count = 1 idx-list
+	)
+'
+
+test_expect_success 'load reverse index when missing .idx, .pack' '
+	git init repo &&
+	test_when_finished "rm -fr repo" &&
+	(
+		cd repo &&
+
+		git config core.multiPackIndex true &&
+
+		test_commit base &&
+		git repack -ad &&
+		git multi-pack-index write &&
+
+		git rev-parse HEAD >tip &&
+		pack=$(ls .git/objects/pack/pack-*.pack) &&
+		idx=$(ls .git/objects/pack/pack-*.idx) &&
+
+		mv $idx $idx.bak &&
+		git cat-file --batch-check="%(objectsize:disk)" <tip &&
+
+		mv $idx.bak $idx &&
+
+		mv $pack $pack.bak &&
+		git cat-file --batch-check="%(objectsize:disk)" <tip
 	)
 '
 
